@@ -1,0 +1,53 @@
+{
+  "agent": {
+    "name": null,
+    "dataDir": null
+  },
+  "wazuh": {
+    "version": "5.x-released",
+    "manager": {
+      "address": null,
+      "port": 1514,
+      "enrollmentPort": 1515,
+      "protocol": "tcp"
+    },
+    "enrollment": {
+      "password": null,
+      "groups": ["default"],
+      "caCert": null
+    }
+  },
+  "queue": {
+    "memoryLimit": 10000,
+    "diskLimitMb": 256,
+    "flushIntervalMs": 1000,
+    "maxRetries": 10
+  },
+  "api": {
+    "host": "127.0.0.1",
+    "port": 8710
+  },
+  "logging": {
+    "level": "info"
+  },
+  "collectors": {
+    "eventChannel": { "enabled": true, "intervalMs": 5000 },
+    "sysmon": { "enabled": false },
+    "defender": { "enabled": false },
+    "powershell": { "enabled": false },
+    "journald": { "enabled": true, "intervalMs": 5000 },
+    "syslog": { "enabled": true },
+    "fileTail": { "enabled": false, "paths": [] }
+  },
+  "fim": {
+    "paths": []
+  },
+  "compliance": {
+    "policyPath": null,
+    "intervalMs": 86400000
+  },
+  "inventory": {
+    "intervalMs": 3600000
+  },
+  "locked": []
+}

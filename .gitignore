@@ -1,0 +1,8 @@
+node_modules/
+agent/node_modules/
+gui/node_modules/
+agent/config/config.local.json
+**/.cusa/
+dist/
+gui/dist/
+src-tauri/target/

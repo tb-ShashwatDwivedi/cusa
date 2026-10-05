@@ -1,0 +1,16 @@
+{
+  "name": "cusa",
+  "version": "0.1.0",
+  "private": true,
+  "description": "CyberSIO Unified Security Agent",
+  "scripts": {
+    "agent": "node agent/src/bootstrap/main.js",
+    "agent:test": "npm test --prefix agent",
+    "gui:dev": "npm run dev --prefix gui",
+    "gui:build": "npm run build --prefix gui",
+    "tauri:dev": "cd src-tauri && cargo tauri dev",
+    "tauri:build": "cd src-tauri && cargo tauri build",
+    "build": "node scripts/build-agent.js",
+    "test": "npm run agent:test"
+  }
+}

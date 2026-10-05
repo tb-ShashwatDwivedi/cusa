@@ -1,0 +1,30 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "CUSA Agent",
+  "version": "0.1.0",
+  "identifier": "com.cybersio.cusa",
+  "build": {
+    "beforeDevCommand": "npm run dev --prefix ../gui",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "npm run build --prefix ../gui",
+    "frontendDist": "../gui/dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "CUSA Agent",
+        "width": 1100,
+        "height": 720,
+        "resizable": true
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; connect-src 'self' http://127.0.0.1:8710"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "icon": ["icons/icon.png"]
+  }
+}

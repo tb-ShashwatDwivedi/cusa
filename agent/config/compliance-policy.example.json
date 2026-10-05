@@ -1,0 +1,13 @@
+{
+  "id": "cusa-basic",
+  "name": "CUSA Basic Compliance",
+  "checks": [
+    {
+      "id": "check-001",
+      "title": "Agent config exists",
+      "type": "file_exists",
+      "path": "config/default.json",
+      "severity": "medium"
+    }
+  ]
+}

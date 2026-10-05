@@ -1,0 +1,17 @@
+{
+  "wazuh": {
+    "manager": {
+      "address": "192.168.0.185",
+      "port": 1514,
+      "enrollmentPort": 1515
+    },
+    "enrollment": {
+      "password": "your-enrollment-password",
+      "apiUser": "wazuh-wui",
+      "apiPassword": "your-api-password",
+      "apiPort": 55000,
+      "insecure": true,
+      "groups": ["default"]
+    }
+  }
+}
