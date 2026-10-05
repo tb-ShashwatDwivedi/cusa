@@ -343,17 +343,17 @@ Designed for thousands of endpoints:
 
 | Phase | Scope | Status |
 |-------|-------|--------|
-| 0 | Research + docs + foundation | **Current** |
-| 1 | Wazuh enrollment + event send | Next |
-| 2 | Queue (memory + durable) | Planned |
-| 3 | Windows collectors | Planned |
-| 4 | Linux collectors | Planned |
-| 5 | Inventory + state sync | Planned |
-| 6 | FIM + Registry + Compliance | Planned |
-| 7 | Commands + Active Response | Planned |
-| 8 | Updater + Tamper detection | Planned |
-| 9 | Tauri GUI | Planned |
-| 10 | Service + MSI packaging | Planned |
+| 0 | Research + docs + foundation | **Complete** |
+| 1 | Wazuh enrollment + event send + sync protocol | **Complete** (text sync markers; FlatBuffers TBD) |
+| 2 | Queue (memory + durable JSONL) | **Complete** |
+| 3 | Windows collectors (incremental bookmarks) | **Complete** |
+| 4 | Linux collectors (journald, syslog, auditd) | **Complete** |
+| 5 | Inventory + delta + state queue | **Complete** |
+| 6 | FIM + Registry + Compliance | **Complete** |
+| 7 | Commands + Active Response | **Complete** |
+| 8 | Updater + Tamper detection | **Complete** (wired; WPK signature TBD) |
+| 9 | Tauri GUI + local API | **Complete** (read-only config) |
+| 10 | Service + MSI packaging | **Deferred** |
 
 ---
 

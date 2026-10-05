@@ -1,5 +1,6 @@
 import { loadConfig } from '../config/loader.js';
 import { createLogger } from '../logging/logger.js';
+import { eventLog } from '../logging/event-log.js';
 import { Agent } from '../core/agent.js';
 
 const logger = createLogger();
@@ -10,6 +11,7 @@ async function main() {
   const agent = new Agent(config, log);
 
   const shutdown = async (signal) => {
+    eventLog.agent(`Shutdown signal received (${signal})`, { signal }, 'warn');
     log.info({ signal }, 'Shutdown signal received');
     await agent.stop();
     process.exit(0);
@@ -17,6 +19,10 @@ async function main() {
   process.on('SIGINT', () => shutdown('SIGINT'));
   process.on('SIGTERM', () => shutdown('SIGTERM'));
 
+  eventLog.agent('Agent starting', {
+    hostname: config.agent?.name,
+    manager: config.wazuh?.manager?.address,
+  });
   await agent.start();
 }
 

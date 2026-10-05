@@ -4,10 +4,10 @@
   "version": "0.1.0",
   "identifier": "com.cybersio.cusa",
   "build": {
-    "beforeDevCommand": "npm run dev --prefix ../gui",
+    "beforeDevCommand": "npm run dev --prefix ./gui",
     "devUrl": "http://localhost:1420",
-    "beforeBuildCommand": "npm run build --prefix ../gui",
-    "frontendDist": "../gui/dist"
+    "beforeBuildCommand": "npm run build --prefix ./gui",
+    "frontendDist": "./gui/dist"
   },
   "app": {
     "windows": [
@@ -25,6 +25,12 @@
   "bundle": {
     "active": true,
     "targets": "all",
-    "icon": ["icons/icon.png"]
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ]
   }
 }

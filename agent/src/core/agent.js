@@ -1,3 +1,4 @@
+import { join } from 'node:path';
 import { WazuhClient } from '../wazuh/client.js';
 import { StateStore } from '../state/store.js';
 import { QueueManager } from '../queue/queue-manager.js';
@@ -8,11 +9,22 @@ import { createCollectors } from '../collectors/registry.js';
 import { normalizeEvent } from '../pipeline/normalize.js';
 import { validateEvent } from '../pipeline/validator.js';
 import { InventoryScanner } from '../inventory/scanner.js';
+import { computeDelta } from '../inventory/delta.js';
 import { FimWatcher } from '../fim/watcher.js';
+import { RegistryWatcher } from '../registry/watcher.js';
 import { ComplianceEngine } from '../compliance/engine.js';
 import { ActiveResponseExecutor } from '../active-response/executor.js';
 import { TamperDetector } from '../security/tamper.js';
+import { Updater } from '../updater/updater.js';
 import { createApiServer } from '../api/server.js';
+import { eventLog } from '../logging/event-log.js';
+import {
+  loadConfig,
+  loadLocalOverlay,
+  saveLocalConfig,
+  applyPatch,
+  flattenPatch,
+} from '../config/loader.js';
 
 export class Agent {
   /** @param {object} config @param {import('pino').Logger} logger */
@@ -31,22 +43,38 @@ export class Agent {
       agentName: config.agent.name,
       state: this.state,
       metrics: this.metrics,
+      health: this.health,
       logger,
     });
     this.collectors = [];
     this.scheduler = new Scheduler();
     this.fim = null;
+    this.registry = null;
     this.compliance = new ComplianceEngine(config.compliance || {});
     this.executor = new ActiveResponseExecutor({
       onRestart: () => process.exit(0),
       onReload: async () => this.reloadConfig(),
     });
+    const tamperPaths = [
+      process.execPath,
+      join(config.agent.dataDir, 'state.json'),
+      join(config.agent.dataDir, 'secrets.enc'),
+    ];
     this.tamper = new TamperDetector({
-      paths: [process.execPath],
+      paths: tamperPaths,
       onTamper: (a) => this.handleTamper(a),
+    });
+    this.updater = new Updater({
+      dataDir: config.agent.dataDir,
+      currentVersion: '0.1.0',
+      onApply: async () => {
+        this.tamper.setUpdateInProgress(false);
+        eventLog.agent('Update staged; restart required to apply', {}, 'warn');
+      },
     });
     this.api = null;
     this.running = false;
+    this.lastComplianceResults = [];
   }
 
   async start() {
@@ -54,8 +82,9 @@ export class Agent {
     await this.queue.init();
     await this.wazuh.init();
 
-    this.wazuh.adapter?.onCommand?.(async (msg) => {
-      await this.queue.enqueueCommand({ raw: msg, receivedAt: Date.now() });
+    this.wazuh.onCommand?.(async (parsed) => {
+      if (parsed.taskId && this.state.hasTaskId(parsed.taskId)) return;
+      await this.queue.enqueueCommand({ parsed, receivedAt: Date.now() });
       this.metrics.inc('commandsReceived');
       await this.processCommands();
     });
@@ -73,16 +102,29 @@ export class Agent {
       await this.fim.start();
     }
 
+    if (this.config.registry?.keys?.length && process.platform === 'win32') {
+      this.registry = new RegistryWatcher(this.config.registry, this.state);
+      this.registry.setHandler((item) => this.queue.enqueueState(item));
+      await this.registry.start();
+    }
+
     await this.compliance.load();
     this.queue.startFlusher(this.wazuh, this.metrics);
+    this.health.setQueue('ok', this.queue.totalDepth());
     await this.tamper.init();
 
-    this.scheduler.schedule('inventory', (this.config.inventory?.intervalMs || 3600000), () => this.syncInventory());
-    this.scheduler.schedule('compliance', (this.config.compliance?.intervalMs || 86400000), () => this.runCompliance());
+    this.scheduler.schedule('inventory', this.config.inventory?.intervalMs || 3600000, () => this.syncInventory());
+    this.scheduler.schedule('compliance', this.config.compliance?.intervalMs || 86400000, () => this.runCompliance());
     this.scheduler.schedule('tamper', 60000, () => this.tamper.check());
 
     this.api = await createApiServer(this);
     this.running = true;
+    const mgr = this.config.wazuh.manager?.address;
+    eventLog.agent('Agent running', {
+      manager: mgr,
+      port: this.config.wazuh.manager?.port,
+      api: `http://${this.config.api?.host || '127.0.0.1'}:${this.config.api?.port || 8710}`,
+    });
     this.logger.info('CUSA agent running');
   }
 
@@ -95,6 +137,7 @@ export class Agent {
       );
       this.metrics.inc('eventsCollected');
       this.metrics.lastEventAt = new Date().toISOString();
+      eventLog.collected(event);
       await this.queue.enqueueEvent(event);
     } catch (err) {
       this.logger.warn({ err }, 'Event ingestion failed');
@@ -104,14 +147,28 @@ export class Agent {
   async syncInventory() {
     const scanner = new InventoryScanner();
     const items = await scanner.scanSystem();
-    await this.wazuh.syncState(items);
+    const delta = computeDelta(this.state.data.lastInventory || [], items);
+    this.state.data.lastInventory = items;
+    for (const item of delta) {
+      await this.queue.enqueueState(item);
+    }
     this.state.data.lastSync = new Date().toISOString();
     await this.state.save();
   }
 
   async runCompliance() {
     const results = await this.compliance.runChecks();
+    this.lastComplianceResults = results;
+    this.state.data.lastCompliance = { at: new Date().toISOString(), results };
+    await this.state.save();
     for (const r of results) {
+      await this.queue.enqueueState({
+        id: `sca-${r.checkId}`,
+        index: 'wazuh-states-sca',
+        operation: 'update',
+        timestamp: r.timestamp,
+        data: r,
+      });
       await this.ingestEvent({
         source: { platform: process.platform === 'win32' ? 'windows' : 'linux', collector: 'compliance' },
         event: { category: 'configuration', type: 'check', action: r.status, severity: r.severity },
@@ -124,20 +181,26 @@ export class Agent {
     const item = await this.queue.commands.dequeue();
     if (!item) return;
     try {
-      const parsed = this.parseCommand(item.payload.raw);
+      const parsed = item.payload.parsed || this.parseCommand(item.payload.raw);
+      if (parsed.taskId) this.state.rememberTaskId(parsed.taskId);
+      if (parsed.action === 'upgrade_agent' && parsed.manifest) {
+        this.tamper.setUpdateInProgress(true);
+        await this.updater.applyUpdate(parsed.manifest);
+      }
       const result = await this.executor.execute(parsed);
-      await this.wazuh.sendCommandResult({ ...result, taskId: parsed.taskId });
+      await this.queue.enqueueCommandResult({ ...result, counter: parsed.counter, taskId: parsed.taskId });
       await this.queue.commands.ack(item.id);
       this.metrics.inc('commandsExecuted');
     } catch (err) {
       this.logger.warn({ err }, 'Command execution failed');
+      await this.queue.commands.requeue(item.id);
     }
   }
 
   parseCommand(raw) {
+    if (typeof raw === 'object') return raw;
     try {
-      const json = JSON.parse(raw);
-      return json;
+      return JSON.parse(raw);
     } catch {
       if (raw.includes('restart')) return { action: 'restart_agent' };
       if (raw.includes('reload')) return { action: 'reload_config' };
@@ -153,8 +216,29 @@ export class Agent {
     });
   }
 
+  /** @param {object} patch nested partial config update */
+  async patchConfig(patch) {
+    const overlay = await loadLocalOverlay(this.config.agent.dataDir);
+    const merged = applyPatch(overlay, patch, this.config.locked || []);
+    await saveLocalConfig(merged, this.config.agent.dataDir);
+    await this.reloadConfig();
+    eventLog.agent('Configuration updated via GUI', { keys: Object.keys(flattenPatch(patch)) });
+    return { effective: this.config, locked: this.config.locked || [] };
+  }
+
   async reloadConfig() {
-    this.logger.info('Config reload requested');
+    const config = await loadConfig(process.env.CUSA_CONFIG || undefined);
+    this.config = config;
+    for (const c of this.collectors) await c.stop();
+    this.collectors = createCollectors(this.config, this.state);
+    for (const c of this.collectors) {
+      c.setEventHandler((partial) => this.ingestEvent(partial));
+      this.health.registerCollector(c.name, () => c.health());
+      if (this.config.collectors?.[c.name]?.enabled !== false) await c.start();
+    }
+    await this.compliance.load();
+    eventLog.agent('Configuration reloaded');
+    this.logger.info('Config reload complete');
   }
 
   getStatus() {
@@ -167,6 +251,7 @@ export class Agent {
       manager: this.config.wazuh.manager?.address,
       transportConnected: this.metrics.transportConnected,
       configVersion: this.state.data.configVersion,
+      lastSync: this.state.data.lastSync,
       metrics: this.metrics.snapshot(),
       queue: { depth: this.queue.totalDepth() },
     };
@@ -178,9 +263,11 @@ export class Agent {
     this.queue.stop();
     for (const c of this.collectors) await c.stop();
     this.fim?.stop();
+    this.registry?.stop();
     await this.wazuh.close();
     await this.api?.close();
     await this.state.save();
+    eventLog.agent('Agent stopped gracefully');
     this.logger.info('CUSA agent stopped');
   }
 }

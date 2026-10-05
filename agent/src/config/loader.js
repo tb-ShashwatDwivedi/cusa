@@ -25,6 +25,70 @@ function deepMerge(target, source) {
   return out;
 }
 
+/** @param {string} dataDir */
+export async function loadLocalOverlay(dataDir) {
+  try {
+    const raw = await readFile(join(dataDir, 'config.local.json'), 'utf8');
+    return JSON.parse(raw);
+  } catch {
+    return {};
+  }
+}
+
+/** @param {string} path @param {Set<string>} locked */
+export function isPathLocked(path, locked) {
+  for (const key of locked) {
+    if (path === key || path.startsWith(`${key}.`)) return true;
+  }
+  return false;
+}
+
+/** @param {object} obj @param {string} [prefix] */
+export function flattenPatch(obj, prefix = '') {
+  const out = {};
+  for (const [k, v] of Object.entries(obj)) {
+    const path = prefix ? `${prefix}.${k}` : k;
+    if (v && typeof v === 'object' && !Array.isArray(v)) {
+      Object.assign(out, flattenPatch(v, path));
+    } else {
+      out[path] = v;
+    }
+  }
+  return out;
+}
+
+/** @param {object} obj @param {string} path */
+export function getByPath(obj, path) {
+  return path.split('.').reduce((o, k) => o?.[k], obj);
+}
+
+/** @param {object} obj @param {string} path @param {unknown} value */
+export function setByPath(obj, path, value) {
+  const keys = path.split('.');
+  let cur = obj;
+  for (let i = 0; i < keys.length - 1; i++) {
+    cur[keys[i]] = cur[keys[i]] || {};
+    cur = cur[keys[i]];
+  }
+  cur[keys[keys.length - 1]] = value;
+}
+
+/**
+ * @param {object} overlay existing local overlay
+ * @param {object} patch nested partial update
+ * @param {string[]} [locked]
+ */
+export function applyPatch(overlay, patch, locked = []) {
+  const lockedSet = new Set(locked);
+  const flat = flattenPatch(patch);
+  for (const path of Object.keys(flat)) {
+    if (isPathLocked(path, lockedSet)) {
+      throw new Error(`Setting is locked: ${path}`);
+    }
+  }
+  return deepMerge(overlay, patch);
+}
+
 /** @param {string} [path] */
 export async function loadConfig(path = DEFAULT_CONFIG) {
   const raw = await readFile(path, 'utf8');
@@ -34,10 +98,11 @@ export async function loadConfig(path = DEFAULT_CONFIG) {
     const local = JSON.parse(await readFile(LOCAL_CONFIG, 'utf8'));
     config = deepMerge(config, local);
   } catch {
-    // no local config
+    // no repo-local config
   }
   const dataDir = getDataDir(config);
   await mkdir(dataDir, { recursive: true });
+  config = deepMerge(config, await loadLocalOverlay(dataDir));
   config.agent = { ...config.agent, dataDir, name: config.agent?.name || os.hostname() };
   return config;
 }

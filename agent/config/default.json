@@ -49,5 +49,5 @@
   "inventory": {
     "intervalMs": 3600000
   },
-  "locked": []
+  "locked": ["collectors.sysmon"]
 }

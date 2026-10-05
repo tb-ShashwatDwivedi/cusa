@@ -66,6 +66,60 @@ export class InventoryScanner {
       }
     }
 
+    try {
+      if (process.platform === 'win32') {
+        const { stdout } = await execFileAsync('powershell.exe', [
+          '-NoProfile', '-Command',
+          'Get-Process | Select-Object Id,ProcessName,CPU | ConvertTo-Json -Compress',
+        ], { timeout: 30000 });
+        const procs = JSON.parse(stdout.startsWith('[') ? stdout : `[${stdout}]`);
+        for (const p of procs.slice(0, 100)) {
+          items.push({
+            id: `proc-${p.Id}`,
+            index: 'wazuh-states-inventory-processes',
+            operation: 'update',
+            timestamp: new Date().toISOString(),
+            data: p,
+          });
+        }
+      } else {
+        const { stdout } = await execFileAsync('ps', ['-eo', 'pid,comm', '--no-headers']);
+        for (const line of stdout.split('\n').filter(Boolean).slice(0, 100)) {
+          const [pid, ...rest] = line.trim().split(/\s+/);
+          items.push({
+            id: `proc-${pid}`,
+            index: 'wazuh-states-inventory-processes',
+            operation: 'update',
+            timestamp: new Date().toISOString(),
+            data: { pid, name: rest.join(' ') },
+          });
+        }
+      }
+    } catch {
+      // process list unavailable
+    }
+
+    try {
+      if (process.platform === 'win32') {
+        const { stdout } = await execFileAsync('powershell.exe', [
+          '-NoProfile', '-Command',
+          'Get-NetTCPConnection -State Listen | Select-Object LocalAddress,LocalPort,OwningProcess | ConvertTo-Json -Compress',
+        ], { timeout: 30000 });
+        const ports = JSON.parse(stdout.startsWith('[') ? stdout : `[${stdout}]`);
+        for (const p of ports.slice(0, 100)) {
+          items.push({
+            id: `port-${p.LocalAddress}-${p.LocalPort}`,
+            index: 'wazuh-states-inventory-ports',
+            operation: 'update',
+            timestamp: new Date().toISOString(),
+            data: p,
+          });
+        }
+      }
+    } catch {
+      // ports unavailable
+    }
+
     const ifaces = os.networkInterfaces();
     for (const [name, addrs] of Object.entries(ifaces)) {
       for (const addr of addrs || []) {

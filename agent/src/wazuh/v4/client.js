@@ -2,7 +2,10 @@ import { deriveEncryptionKey, encryptMessage, decryptMessage } from './crypto.js
 import { enroll, loadIdentity, persistIdentity } from './enrollment.js';
 import { enrollViaApi } from './api-enrollment.js';
 import { TcpTransport } from './transport.js';
-import { serializeEvent, serializeStateItem } from './event-serializer.js';
+import { serializeEvent } from './event-serializer.js';
+import { runSyncSession } from './sync-protocol.js';
+import { parseManagerCommand, formatCommandAck } from './commands.js';
+import { eventLog } from '../../logging/event-log.js';
 
 export class WazuhAdapter {
   /** @param {object} options */
@@ -15,6 +18,28 @@ export class WazuhAdapter {
     this.encKey = null;
     this.transport = null;
     this.commandHandlers = [];
+    this.syncAckHandlers = [];
+    this.health = options.health;
+  }
+
+  sendPlaintext(plaintext) {
+    if (!this.encKey) throw new Error('Not enrolled');
+    const counters = this.state.nextCounters();
+    const payload = encryptMessage(plaintext, counters, this.encKey);
+    const sent = this.transport?.send(payload);
+    if (sent) {
+      this.metrics?.inc('stateSent');
+      return this.state.save();
+    }
+    throw new Error('Transport not connected');
+  }
+
+  onSyncAck(handler) {
+    this.syncAckHandlers.push(handler);
+  }
+
+  offSyncAck(handler) {
+    this.syncAckHandlers = this.syncAckHandlers.filter((h) => h !== handler);
   }
 
   async init() {
@@ -28,14 +53,27 @@ export class WazuhAdapter {
     }
     this.transport = new TcpTransport({ host: manager.address, port: manager.port });
     this.transport.on('connect', () => {
+      eventLog.agent(`Connected to manager ${manager.address}:${manager.port}`, {
+        host: manager.address,
+        port: manager.port,
+      });
       this.logger?.info('Connected to Wazuh manager');
       this.metrics && (this.metrics.transportConnected = true);
+      this.health?.setTransport('connected');
     });
     this.transport.on('disconnect', () => {
+      eventLog.agent(`Disconnected from manager ${manager.address}:${manager.port}`, {
+        host: manager.address,
+        port: manager.port,
+      }, 'warn');
       this.metrics && (this.metrics.transportConnected = false);
+      this.health?.setTransport('disconnected');
     });
     this.transport.on('message', (payload) => this.onManagerMessage(payload));
-    this.transport.on('error', (err) => this.logger?.warn({ err }, 'Transport error'));
+    this.transport.on('error', (err) => {
+      eventLog.agent(`Transport error: ${err.message}`, { err: String(err) }, 'error');
+      this.logger?.warn({ err }, 'Transport error');
+    });
     if (manager.address) this.transport.start();
   }
 
@@ -53,6 +91,7 @@ export class WazuhAdapter {
           password: enrollment.apiPassword,
           insecure: enrollment.insecure === true,
         });
+        eventLog.agent('Enrolled via Wazuh API', { agentId: this.identity.id, name: this.identity.name });
         this.logger?.info('Enrolled via Wazuh API');
       } catch (err) {
         this.logger?.warn({ err }, 'API enrollment failed, trying authd');
@@ -69,6 +108,7 @@ export class WazuhAdapter {
           groups,
           ca: enrollment?.caCert,
         });
+        eventLog.agent('Enrolled via authd (port 1515)', { agentId: this.identity.id, name: this.identity.name });
         this.logger?.info('Enrolled via authd (port 1515)');
       } catch (err) {
         this.logger?.error({ err }, 'All enrollment methods failed');
@@ -102,22 +142,21 @@ export class WazuhAdapter {
 
   /** @param {object[]} items */
   async syncState(items) {
-    for (const item of items) {
-      const plaintext = serializeStateItem(item);
-      const counters = this.state.nextCounters();
-      const payload = encryptMessage(plaintext, counters, this.encKey);
-      this.transport?.send(payload);
-    }
+    if (!this.encKey) throw new Error('Not enrolled');
+    const result = await runSyncSession(this, { module: 'syscollector', items, mode: 'delta' });
     this.state.data.lastSync = new Date().toISOString();
     await this.state.save();
+    return result;
   }
 
   onManagerMessage(payload) {
     if (!this.encKey) return;
     try {
       const text = decryptMessage(payload, this.encKey);
+      for (const handler of this.syncAckHandlers) handler(text);
       if (text.includes('#!-')) {
-        for (const handler of this.commandHandlers) handler(text);
+        const parsed = parseManagerCommand(text);
+        for (const handler of this.commandHandlers) handler(parsed);
       }
     } catch (err) {
       this.logger?.warn({ err }, 'Failed to decrypt manager message');
@@ -133,8 +172,8 @@ export class WazuhAdapter {
   }
 
   async sendCommandResult(result) {
-    const counters = this.state.nextCounters();
-    this.transport?.send(encryptMessage(`#cmd-result:${JSON.stringify(result)}`, counters, this.encKey));
+    const ack = formatCommandAck(result);
+    await this.sendPlaintext(ack);
   }
 
   async fetchConfiguration() {

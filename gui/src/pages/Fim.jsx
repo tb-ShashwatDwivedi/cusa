@@ -1,24 +1,56 @@
 import { api } from '../services/api.js';
 import { usePoll } from '../hooks/usePoll.js';
+import {
+  DataTable,
+  ErrorBanner,
+  MetricGrid,
+  PageHeader,
+  Section,
+  StatCard,
+} from '../components/ui.jsx';
 
 export default function Fim() {
-  const { data, error } = usePoll(() => api.config(), 10000);
-  const paths = data?.effective?.fim?.paths || [];
+  const { data, error, loading } = usePoll(() => api.fim(), 5000);
 
-  if (error) return <div className="error-banner">Agent unreachable: {error}</div>;
+  if (error) {
+    return <ErrorBanner>Agent unreachable: {error}</ErrorBanner>;
+  }
+
+  const baseline = data?.baseline || {};
+  const rows = Object.entries(baseline).map(([path, info]) => ({
+    id: path,
+    path,
+    size: info.size ?? '—',
+    hash: info.hash ? `${info.hash.slice(0, 12)}…` : 'dir',
+  }));
+
+  const columns = [
+    { key: 'path', label: 'Path', mono: true, render: (r) => r.path },
+    { key: 'size', label: 'Size', mono: true },
+    { key: 'hash', label: 'SHA-256', mono: true },
+  ];
 
   return (
     <>
-      <h2>File Integrity Monitoring</h2>
-      <div className="card" style={{ marginBottom: '1rem' }}>
-        <div className="label">Monitored paths</div>
-        <div className="value" style={{ fontSize: '1rem' }}>
-          {paths.length ? paths.join(', ') : 'No paths configured'}
-        </div>
-      </div>
-      <p style={{ color: 'var(--muted)' }}>
-        FIM uses filesystem watchers with SHA-256 baselines. Changes sync via Wazuh state protocol.
-      </p>
+      <PageHeader
+        title="File integrity monitoring"
+        description="Monitored paths with SHA-256 baselines synced via Wazuh state protocol."
+      />
+
+      <MetricGrid>
+        <StatCard label="Monitored paths" value={data?.paths?.length ?? 0} loading={loading && !data} />
+        <StatCard label="Baseline entries" value={data?.count ?? 0} loading={loading && !data} mono />
+      </MetricGrid>
+
+      <Section title="Baseline">
+        {loading && !data ? (
+          <div className="empty-state">
+            <p className="empty-title">Loading FIM baseline…</p>
+          </div>
+        ) : (
+          <DataTable columns={columns} rows={rows} emptyMessage="No baseline entries yet" />
+        )}
+      </Section>
     </>
   );
 }

@@ -28,9 +28,13 @@ export class TcpTransport extends EventEmitter {
       this.emit('connect');
     });
     this.socket.on('data', (chunk) => this.onData(chunk));
-    this.socket.on('error', (err) => this.emit('error', err));
+    this.socket.on('error', (err) => {
+      this.connected = false;
+      this.emit('error', err);
+    });
     this.socket.on('close', () => {
       this.connected = false;
+      this.socket = null;
       this.emit('disconnect');
       if (this.shouldRun) setTimeout(() => this.connect(), this.reconnectMs);
       this.reconnectMs = Math.min(this.reconnectMs * 2, this.maxReconnectMs);
@@ -50,11 +54,16 @@ export class TcpTransport extends EventEmitter {
 
   /** @param {Buffer} payload */
   send(payload) {
-    if (!this.connected || !this.socket) return false;
-    const header = Buffer.alloc(4);
-    header.writeUInt32LE(payload.length, 0);
-    this.socket.write(Buffer.concat([header, payload]));
-    return true;
+    if (!this.connected || !this.socket || this.socket.destroyed || !this.socket.writable) return false;
+    try {
+      const header = Buffer.alloc(4);
+      header.writeUInt32LE(payload.length, 0);
+      this.socket.write(Buffer.concat([header, payload]));
+      return true;
+    } catch {
+      this.connected = false;
+      return false;
+    }
   }
 
   stop() {

@@ -15,7 +15,23 @@ export class StateStore {
       configVersion: 0,
       lastSync: null,
       lastCommand: null,
+      lastInventory: [],
+      lastCompliance: null,
+      registryBaseline: {},
     };
+  }
+
+  hasTaskId(id) {
+    return (this.data.taskIds || []).includes(String(id));
+  }
+
+  rememberTaskId(id) {
+    const key = String(id);
+    if (!this.data.taskIds) this.data.taskIds = [];
+    if (!this.data.taskIds.includes(key)) {
+      this.data.taskIds.push(key);
+      if (this.data.taskIds.length > 500) this.data.taskIds.shift();
+    }
   }
 
   async load() {

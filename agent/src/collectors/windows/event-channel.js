@@ -12,6 +12,7 @@ export class WindowsEventChannelCollector extends Collector {
     this.state = state;
     this.channels = config.channels || DEFAULT_CHANNELS;
     this.timer = null;
+    this.lastError = null;
   }
 
   async start() {
@@ -24,14 +25,14 @@ export class WindowsEventChannelCollector extends Collector {
     for (const channel of this.channels) {
       try {
         const bookmark = this.state.getBookmark('event-channel', channel);
-        const args = [
-          '-NoProfile',
-          '-Command',
-          `Get-WinEvent -LogName '${channel}' -MaxEvents 20 | Select-Object -First 20 | ConvertTo-Json -Compress`,
-        ];
+        const filter = bookmark
+          ? `Get-WinEvent -LogName '${channel}' -FilterXPath '*[System[(EventRecordID > ${bookmark})]]' -MaxEvents 50`
+          : `Get-WinEvent -LogName '${channel}' -MaxEvents 50`;
+        const args = ['-NoProfile', '-Command', `${filter} | ConvertTo-Json -Compress`];
         const { stdout } = await execFileAsync('powershell.exe', args, { timeout: 30000 });
         if (!stdout.trim()) continue;
         const events = JSON.parse(stdout.startsWith('[') ? stdout : `[${stdout}]`);
+        let maxId = bookmark || 0;
         for (const ev of events) {
           const id = ev.RecordId || ev.Id;
           if (bookmark && id <= bookmark) continue;
@@ -40,14 +41,20 @@ export class WindowsEventChannelCollector extends Collector {
             event: { category: 'windows', type: 'event', action: String(ev.Id) },
             raw: JSON.stringify(ev),
           });
-          if (id) this.state.setBookmark('event-channel', channel, id);
+          if (id && id > maxId) maxId = id;
         }
-      } catch {
-        // channel unavailable or access denied
+        if (maxId && maxId !== bookmark) this.state.setBookmark('event-channel', channel, maxId);
+      } catch (err) {
+        this.lastError = err.message;
       }
     }
     await this.state.save();
     this.timer = setTimeout(() => this.poll(), this.config.intervalMs || 5000);
+  }
+
+  async health() {
+    const base = await super.health();
+    return { ...base, lastError: this.lastError || null };
   }
 
   async stop() {

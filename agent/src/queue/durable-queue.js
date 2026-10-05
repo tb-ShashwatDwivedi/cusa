@@ -1,4 +1,4 @@
-import { appendFile, readFile, writeFile, mkdir, rename } from 'node:fs/promises';
+import { appendFile, readFile, writeFile, mkdir, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 
@@ -6,16 +6,18 @@ export class DurableQueue {
   /**
    * @param {string} dataDir
    * @param {string} name
-   * @param {number} [diskLimitMb]
+   * @param {object} [opts]
    */
-  constructor(dataDir, name, diskLimitMb = 256) {
+  constructor(dataDir, name, opts = {}) {
     this.dir = join(dataDir, 'queue', name);
     this.spoolPath = join(this.dir, 'spool.jsonl');
     this.pendingPath = join(this.dir, 'pending.json');
-    this.diskLimitMb = diskLimitMb;
+    this.diskLimitMb = opts.diskLimitMb || 256;
+    this.memoryLimit = opts.memoryLimit || 10000;
+    this.maxRetries = opts.maxRetries || 10;
     this.pending = [];
     this.memory = [];
-    this.memoryLimit = 10000;
+    this.inFlight = null;
   }
 
   async init() {
@@ -26,6 +28,29 @@ export class DurableQueue {
     } catch {
       this.pending = [];
     }
+    await this.reloadSpool();
+  }
+
+  async reloadSpool() {
+    try {
+      const raw = await readFile(this.spoolPath, 'utf8');
+      const lines = raw.trim().split('\n').filter(Boolean);
+      for (const line of lines) {
+        this.memory.push(JSON.parse(line));
+      }
+      if (lines.length) await writeFile(this.spoolPath, '');
+    } catch {
+      // no spool yet
+    }
+  }
+
+  async spoolSizeMb() {
+    try {
+      const st = await stat(this.spoolPath);
+      return st.size / (1024 * 1024);
+    } catch {
+      return 0;
+    }
   }
 
   /** @param {string} type @param {object} payload */
@@ -34,7 +59,9 @@ export class DurableQueue {
     this.memory.push(item);
     if (this.memory.length > this.memoryLimit) {
       const overflow = this.memory.splice(0, this.memory.length - this.memoryLimit);
-      await appendFile(this.spoolPath, overflow.map((o) => JSON.stringify(o)).join('\n') + '\n');
+      if (await this.spoolSizeMb() < this.diskLimitMb) {
+        await appendFile(this.spoolPath, overflow.map((o) => JSON.stringify(o)).join('\n') + '\n');
+      }
     }
     this.pending.push(item.id);
     await this.persistPending();
@@ -45,28 +72,54 @@ export class DurableQueue {
     await writeFile(this.pendingPath, JSON.stringify(this.pending));
   }
 
+  /** @returns {object|null} */
+  peek() {
+    if (this.inFlight) return this.inFlight;
+    if (this.memory.length) return this.memory[0];
+    return null;
+  }
+
   /** @returns {Promise<object|null>} */
   async dequeue() {
-    if (this.memory.length) return this.memory.shift();
-    try {
-      const raw = await readFile(this.spoolPath, 'utf8');
-      const lines = raw.trim().split('\n').filter(Boolean);
-      if (!lines.length) return null;
-      const item = JSON.parse(lines[0]);
-      await writeFile(this.spoolPath, lines.slice(1).join('\n') + (lines.length > 1 ? '\n' : ''));
-      return item;
-    } catch {
-      return null;
+    if (this.inFlight) return this.inFlight;
+    let item = null;
+    if (this.memory.length) {
+      item = this.memory.shift();
+    } else {
+      try {
+        const raw = await readFile(this.spoolPath, 'utf8');
+        const lines = raw.trim().split('\n').filter(Boolean);
+        if (!lines.length) return null;
+        item = JSON.parse(lines[0]);
+        await writeFile(this.spoolPath, lines.slice(1).join('\n') + (lines.length > 1 ? '\n' : ''));
+      } catch {
+        return null;
+      }
     }
+    if (item) this.inFlight = item;
+    return item;
   }
 
   /** @param {string} id */
   async ack(id) {
     this.pending = this.pending.filter((p) => p !== id);
+    if (this.inFlight?.id === id) this.inFlight = null;
+    await this.persistPending();
+  }
+
+  /** @param {string} id */
+  async requeue(id) {
+    if (!this.inFlight || this.inFlight.id !== id) return;
+    const item = this.inFlight;
+    item.attempts += 1;
+    this.inFlight = null;
+    if (item.attempts >= this.maxRetries) return;
+    this.memory.unshift(item);
+    this.pending.push(item.id);
     await this.persistPending();
   }
 
   depth() {
-    return this.memory.length + this.pending.length;
+    return this.memory.length + this.pending.length + (this.inFlight ? 1 : 0);
   }
 }

@@ -33,6 +33,7 @@ export class WazuhClient {
       agentName: this.options.agentName,
       state: this.options.state,
       metrics: this.options.metrics,
+      health: this.options.health,
       logger: this.options.logger,
     });
     await this.adapter.init();
@@ -67,6 +68,11 @@ export class WazuhClient {
 
   async sendHealth() {
     return this.adapter.sendHealth();
+  }
+
+  /** @param {(cmd: object) => void} handler */
+  onCommand(handler) {
+    return this.adapter?.onCommand(handler);
   }
 
   async close() {

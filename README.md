@@ -75,6 +75,7 @@ cd ../src-tauri && cargo tauri dev
 
 ## Documentation
 
+- **[Complete User Guide](docs/user-guide.md)** — start here: setup, every agent module, GUI pages, API reference, troubleshooting
 - [Architecture](docs/architecture.md)
 - [Wazuh Compatibility](docs/wazuh-compatibility.md)
 - [Event Schema](docs/event-schema.md)

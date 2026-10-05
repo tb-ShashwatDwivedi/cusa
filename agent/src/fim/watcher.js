@@ -1,11 +1,12 @@
 import { watch } from 'node:fs';
-import { stat } from 'node:fs/promises';
+import { stat, readdir, readFile } from 'node:fs/promises';
+import { join } from 'node:path';
 import { createHash } from 'node:crypto';
-import { readFile } from 'node:fs/promises';
 
 export class FimWatcher {
   /** @param {object} config @param {import('../state/store.js').StateStore} state */
   constructor(config, state) {
+    this.config = config;
     this.paths = config.paths || [];
     this.state = state;
     this.watchers = [];
@@ -26,10 +27,25 @@ export class FimWatcher {
   }
 
   async baseline(path) {
+    await this.walkBaseline(path, 0);
+  }
+
+  async walkBaseline(path, depth) {
+    if (depth > (this.config.maxDepth || 3)) return;
     try {
       const st = await stat(path);
-      const hash = st.isFile() ? await this.hashFile(path) : null;
-      this.state.data.fimBaseline[path] = { mtime: st.mtimeMs, size: st.size, hash };
+      if (st.isFile()) {
+        const hash = await this.hashFile(path);
+        this.state.data.fimBaseline[path] = { mtime: st.mtimeMs, size: st.size, hash };
+        return;
+      }
+      if (st.isDirectory()) {
+        this.state.data.fimBaseline[path] = { mtime: st.mtimeMs, size: st.size, hash: null };
+        const entries = await readdir(path);
+        for (const entry of entries) {
+          await this.walkBaseline(join(path, entry), depth + 1);
+        }
+      }
     } catch {
       // path missing
     }

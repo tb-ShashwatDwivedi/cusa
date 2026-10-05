@@ -5,6 +5,7 @@ import { DefenderCollector } from './windows/defender.js';
 import { PowerShellCollector } from './windows/powershell.js';
 import { JournaldCollector } from './linux/journald.js';
 import { SyslogCollector } from './linux/syslog.js';
+import { AuditdCollector } from './linux/auditd.js';
 
 /** @param {object} config @param {import('../state/store.js').StateStore} state */
 export function createCollectors(config, state) {
@@ -22,6 +23,7 @@ export function createCollectors(config, state) {
   } else {
     if (cfg.journald?.enabled !== false) collectors.push(new JournaldCollector(cfg.journald || {}, state));
     if (cfg.syslog?.enabled !== false) collectors.push(new SyslogCollector(cfg.syslog || {}));
+    if (cfg.auditd?.enabled !== false) collectors.push(new AuditdCollector(cfg.auditd || {}));
   }
 
   if (cfg.fileTail?.enabled && cfg.fileTail.paths?.length) {

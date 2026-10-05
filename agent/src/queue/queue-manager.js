@@ -3,10 +3,15 @@ import { DurableQueue } from './durable-queue.js';
 export class QueueManager {
   /** @param {string} dataDir @param {object} config */
   constructor(dataDir, config) {
-    this.events = new DurableQueue(dataDir, 'events', config.diskLimitMb);
-    this.state = new DurableQueue(dataDir, 'state', config.diskLimitMb);
-    this.commands = new DurableQueue(dataDir, 'commands', config.diskLimitMb);
-    this.results = new DurableQueue(dataDir, 'command-results', config.diskLimitMb);
+    const qOpts = {
+      diskLimitMb: config.diskLimitMb,
+      memoryLimit: config.memoryLimit,
+      maxRetries: config.maxRetries,
+    };
+    this.events = new DurableQueue(dataDir, 'events', qOpts);
+    this.state = new DurableQueue(dataDir, 'state', qOpts);
+    this.commands = new DurableQueue(dataDir, 'commands', qOpts);
+    this.results = new DurableQueue(dataDir, 'command-results', qOpts);
     this.flushIntervalMs = config.flushIntervalMs || 1000;
     this.maxRetries = config.maxRetries || 10;
     this.running = false;
@@ -33,6 +38,10 @@ export class QueueManager {
     return this.commands.enqueue('command', payload);
   }
 
+  async enqueueCommandResult(payload) {
+    return this.results.enqueue('result', payload);
+  }
+
   totalDepth() {
     return this.events.depth() + this.state.depth() + this.commands.depth();
   }
@@ -40,7 +49,7 @@ export class QueueManager {
   /** @param {import('../wazuh/client.js').WazuhClient} wazuh @param {import('../core/metrics.js').Metrics} metrics */
   startFlusher(wazuh, metrics) {
     this.running = true;
-    const tick = async () => {
+    const flushEvents = async () => {
       if (!this.running) return;
       const batch = [];
       for (let i = 0; i < 50; i++) {
@@ -53,13 +62,49 @@ export class QueueManager {
           await wazuh.sendEvents(batch.map((b) => b.payload));
           for (const item of batch) await this.events.ack(item.id);
         } catch {
-          for (const item of batch) this.events.memory.unshift(item);
+          for (const item of batch) await this.events.requeue(item.id);
         }
       }
       metrics.set('queueDepth', this.totalDepth());
-      setTimeout(tick, this.flushIntervalMs);
+      setTimeout(flushEvents, this.flushIntervalMs);
     };
-    tick();
+
+    const flushState = async () => {
+      if (!this.running) return;
+      const items = [];
+      for (let i = 0; i < 100; i++) {
+        const item = await this.state.dequeue();
+        if (!item) break;
+        items.push(item);
+      }
+      if (items.length) {
+        try {
+          await wazuh.syncState(items.map((i) => i.payload));
+          for (const item of items) await this.state.ack(item.id);
+        } catch {
+          for (const item of items) await this.state.requeue(item.id);
+        }
+      }
+      setTimeout(flushState, this.flushIntervalMs * 2);
+    };
+
+    const flushResults = async () => {
+      if (!this.running) return;
+      const item = await this.results.dequeue();
+      if (item) {
+        try {
+          await wazuh.sendCommandResult(item.payload);
+          await this.results.ack(item.id);
+        } catch {
+          await this.results.requeue(item.id);
+        }
+      }
+      setTimeout(flushResults, this.flushIntervalMs);
+    };
+
+    flushEvents();
+    flushState();
+    flushResults();
   }
 
   stop() {

@@ -33,7 +33,13 @@ export function enroll(opts) {
     socket.on('data', (d) => chunks.push(d));
     socket.on('error', reject);
     socket.on('end', () => {
-      const raw = Buffer.concat(chunks).toString('utf8');
+      const buf = Buffer.concat(chunks);
+      let body = buf;
+      if (buf.length >= 4) {
+        const len = buf.readUInt32LE(0);
+        if (len > 0 && len <= buf.length - 4) body = buf.subarray(4, 4 + len);
+      }
+      const raw = body.toString('utf8');
       const match = raw.match(/OSSEC K:'(\d+)\s+(\S+)\s+(\S+)\s+(\S+)'/);
       if (!match) return reject(new Error(`Enrollment failed: ${raw}`));
       resolve({ id: match[1], name: match[2], ip: match[3], key: match[4] });
