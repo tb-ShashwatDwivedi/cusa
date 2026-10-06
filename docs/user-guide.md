@@ -65,7 +65,7 @@ This guide covers every major section of the agent and GUI: what it does, how it
 |-------------|-----------------|
 | Node.js | **≥ 20** (agent runtime) |
 | npm | Comes with Node |
-| Wazuh Manager | 4.x or 5.x-released (TCP 1514 + enrollment 1515) |
+| Wazuh Manager | **4.11** (default), or 4.x / 5.x-released (TCP 1514 + enrollment 1515) |
 | Windows | PowerShell for event collectors (admin helps for Security log) |
 | Linux | `journalctl`, read access to `/var/log/*` |
 | Rust (optional) | Only for building the Tauri desktop app — **not** required to run the agent |
@@ -167,7 +167,7 @@ File: `agent/config/default.json`
 
 | Key | Default | Description |
 |-----|---------|-------------|
-| `version` | `5.x-released` | Protocol profile (`4.x`, `5.x-released`, `5.x-https`) |
+| `version` | `4.11` | Protocol profile (`4.11`, `4.x`, `5.x-released`, `5.x-https`) |
 | `manager.address` | `null` | Must be set for connectivity |
 | `manager.port` | `1514` | TCP event port |
 | `manager.enrollmentPort` | `1515` | TLS enrollment port |
@@ -360,9 +360,12 @@ Set `wazuh.version` in config:
 
 | Value | Adapter | Use when |
 |-------|---------|----------|
-| `4.x` | v4 (TCP) | Wazuh 4.x managers |
-| `5.x-released` | v4 (TCP) | **Default** — production Wazuh 5.x |
+| `4.11` | v4 (TCP) | **Default** — Wazuh Manager 4.11 (legacy `d:` state sync) |
+| `4.x` | v4 (TCP) | Other Wazuh 4.x managers |
+| `5.x-released` | v4 (TCP) | Released Wazuh 5.x managers |
 | `5.x-https` | v5 (stub) | Developing HTTPS branch only |
+
+For Manager **4.11**, enrollment reports `V:'Wazuh v4.11.2'` and inventory/FIM state uses per-item `d:index:json` messages (not session sync markers). Override with `wazuh.enrollment.agentVersion` if needed.
 
 ### 6.3 Verify on manager
 

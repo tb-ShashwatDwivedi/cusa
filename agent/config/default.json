@@ -4,7 +4,7 @@
     "dataDir": null
   },
   "wazuh": {
-    "version": "5.x-released",
+    "version": "4.11",
     "manager": {
       "address": null,
       "port": 1514,

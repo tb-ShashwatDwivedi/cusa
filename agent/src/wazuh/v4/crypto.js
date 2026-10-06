@@ -16,8 +16,8 @@ export function deriveEncryptionKey(pass, name, id) {
 /** @param {string} event @param {{global:number,local:number}} counters */
 export function buildBlock(event, counters) {
   const random = String(Math.floor(Math.random() * 100000)).padStart(5, '0');
-  const global = String(counters.global);
-  const local = String(counters.local);
+  const global = String(counters.global).padStart(10, '0');
+  const local = String(counters.local).padStart(4, '0');
   const msg = Buffer.from(`${random}${global}:${local}:${event}`, 'utf8');
   const md5 = createHash('md5').update(msg).digest('hex');
   return Buffer.concat([Buffer.from(md5, 'utf8'), msg]);
@@ -39,14 +39,28 @@ export function encryptBlock(block, key) {
   return Buffer.concat([Buffer.from('#AES:'), encrypted]);
 }
 
-/** @param {string} plaintext @param {{global:number,local:number}} counters @param {Buffer} key */
-export function encryptMessage(plaintext, counters, key) {
-  return encryptBlock(buildBlock(plaintext, counters), key);
+/** Strip optional !<agentId>! prefix before #AES: or : */
+function stripAgentPrefix(data) {
+  if (data[0] !== 0x21) return data; // '!'
+  const end = data.indexOf(0x21, 1);
+  if (end < 0) return data;
+  return data.subarray(end + 1);
+}
+
+/** @param {string} agentId @param {Buffer} aesPayload payload starting with #AES: */
+export function wrapAgentPayload(agentId, aesPayload) {
+  return Buffer.concat([Buffer.from(`!${agentId}!`), aesPayload]);
+}
+
+/** @param {string} plaintext @param {{global:number,local:number}} counters @param {Buffer} key @param {string} [agentId] */
+export function encryptMessage(plaintext, counters, key, agentId) {
+  const aesPayload = encryptBlock(buildBlock(plaintext, counters), key);
+  return agentId ? wrapAgentPayload(agentId, aesPayload) : aesPayload;
 }
 
 /** @param {Buffer} payload @param {Buffer} key */
 export function decryptMessage(payload, key) {
-  let data = payload;
+  let data = stripAgentPrefix(payload);
   if (data.subarray(0, 5).toString() === '#AES:') data = data.subarray(5);
   const decipher = createDecipheriv('aes-256-cbc', key.subarray(0, 32), AES_IV);
   const decrypted = Buffer.concat([decipher.update(data), decipher.final()]);

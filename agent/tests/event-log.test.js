@@ -4,7 +4,7 @@ import { eventLog } from '../src/logging/event-log.js';
 
 describe('event log', () => {
   it('stores agent and collected entries', () => {
-    eventLog.agent('Agent started', { manager: '10.0.0.1' });
+    eventLog.agent('Agent started', { manager: '192.168.0.185' });
     eventLog.collected({
       eventId: 'e1',
       source: { platform: 'windows', collector: 'event-channel', channel: 'Security' },

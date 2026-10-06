@@ -5,6 +5,10 @@
  */
 
 import { resolveAdapter } from './version.js';
+import { WazuhAdapter as WazuhAdapterV4 } from './v4/client.js';
+import { WazuhAdapter as WazuhAdapterV5 } from './v5/client.js';
+
+const ADAPTERS = { v4: WazuhAdapterV4, v5: WazuhAdapterV5 };
 
 /**
  * @typedef {object} WazuhClientOptions
@@ -24,9 +28,11 @@ export class WazuhClient {
   /** @returns {Promise<void>} */
   async init() {
     const adapterName = resolveAdapter(this.options.version);
-    const mod = await import(`./${adapterName}/client.js`);
-    this.adapter = new mod.WazuhAdapter({
+    const Adapter = ADAPTERS[adapterName];
+    if (!Adapter) throw new Error(`No adapter for ${adapterName}`);
+    this.adapter = new Adapter({
       ...this.options,
+      version: this.options.version,
       manager: this.options.manager,
       enrollment: this.options.enrollment,
       dataDir: this.options.dataDir,
@@ -40,7 +46,9 @@ export class WazuhClient {
   }
 
   async enroll() {
-    return this.adapter.enroll();
+    const identity = await this.adapter.enroll();
+    if (!identity) throw new Error('Enrollment failed');
+    return identity;
   }
 
   /** @param {object[]} events */

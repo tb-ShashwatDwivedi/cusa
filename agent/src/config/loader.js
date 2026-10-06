@@ -2,14 +2,23 @@ import { readFile, writeFile, mkdir, access } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import os from 'node:os';
+import { defaultDataRoot, resolvePaths } from '../platform/paths.js';
+import { loadDeployOverlay } from '../platform/deploy.js';
+import { migrateDataLayout, migrateConfigSchema, saveConfigWithBackup } from './migrate.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const DEFAULT_CONFIG = join(__dirname, '../../config/default.json');
 const LOCAL_CONFIG = join(__dirname, '../../config/config.local.json');
 
-/** @returns {string} */
-export function getDataDir(config) {
-  return config.agent?.dataDir || join(os.homedir(), '.cusa');
+/** @param {object} [config] */
+export async function getDataDir(config) {
+  if (config?.agent?.dataDir) return config.agent.dataDir;
+  return defaultDataRoot();
+}
+
+/** @param {string} dataDir */
+export function getPaths(dataDir) {
+  return resolvePaths(dataDir);
 }
 
 /** Deep-merge source into target */
@@ -25,11 +34,11 @@ function deepMerge(target, source) {
   return out;
 }
 
-/** @param {string} dataDir */
-export async function loadLocalOverlay(dataDir) {
+/** @param {string} configPath */
+export async function loadLocalOverlay(configPath) {
   try {
-    const raw = await readFile(join(dataDir, 'config.local.json'), 'utf8');
-    return JSON.parse(raw);
+    const raw = await readFile(configPath, 'utf8');
+    return migrateConfigSchema(JSON.parse(raw));
   } catch {
     return {};
   }
@@ -89,9 +98,22 @@ export function applyPatch(overlay, patch, locked = []) {
   return deepMerge(overlay, patch);
 }
 
+/** Packaged exe loads config from <exe-dir>/config/default.json */
+async function resolveDefaultConfigPath() {
+  if (process.env.CUSA_CONFIG) return process.env.CUSA_CONFIG;
+  const besideExe = join(dirname(process.execPath), 'config', 'default.json');
+  try {
+    await access(besideExe);
+    return besideExe;
+  } catch {
+    return DEFAULT_CONFIG;
+  }
+}
+
 /** @param {string} [path] */
-export async function loadConfig(path = DEFAULT_CONFIG) {
-  const raw = await readFile(path, 'utf8');
+export async function loadConfig(path) {
+  const configPath = path || await resolveDefaultConfigPath();
+  const raw = await readFile(configPath, 'utf8');
   let config = JSON.parse(raw);
   try {
     await access(LOCAL_CONFIG);
@@ -100,18 +122,31 @@ export async function loadConfig(path = DEFAULT_CONFIG) {
   } catch {
     // no repo-local config
   }
-  const dataDir = getDataDir(config);
-  await mkdir(dataDir, { recursive: true });
-  config = deepMerge(config, await loadLocalOverlay(dataDir));
+
+  const dataDir = await getDataDir(config);
+  const paths = getPaths(dataDir);
+  await migrateDataLayout(paths);
+  await mkdir(paths.configDir, { recursive: true });
+
+  const deploy = await loadDeployOverlay(paths.deploy);
+  const localOverlay = await loadLocalOverlay(paths.configLocal);
+  const mergedLocal = migrateConfigSchema(deepMerge(deploy, localOverlay));
+
+  config = deepMerge(config, mergedLocal);
   config.agent = { ...config.agent, dataDir, name: config.agent?.name || os.hostname() };
+  config._paths = paths;
+  config.deploy = deploy.source ? { source: deploy.source, deployedAt: deploy.deployedAt } : null;
   return config;
 }
 
 /** @param {object} config @param {string} dataDir */
 export async function saveLocalConfig(config, dataDir) {
-  const localPath = join(dataDir, 'config.local.json');
-  await writeFile(localPath, JSON.stringify(config, null, 2));
-  return localPath;
+  const paths = getPaths(dataDir);
+  const toSave = migrateConfigSchema({ ...config, schemaVersion: 3 });
+  delete toSave._paths;
+  delete toSave.deploy;
+  await saveConfigWithBackup(paths.configLocal, toSave);
+  return paths.configLocal;
 }
 
 /** Merge manager config over local; locked keys win from manager. */

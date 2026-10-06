@@ -9,6 +9,7 @@ import {
   Stethoscope,
   Shield,
   Scroll,
+  Prohibit,
 } from '@phosphor-icons/react';
 import { api } from './services/api.js';
 import { usePoll } from './hooks/usePoll.js';
@@ -20,6 +21,7 @@ import Fim from './pages/Fim.jsx';
 import Compliance from './pages/Compliance.jsx';
 import Diagnostics from './pages/Diagnostics.jsx';
 import Logs from './pages/Logs.jsx';
+import Decommission from './pages/Decommission.jsx';
 
 const links = [
   { to: '/', label: 'Dashboard', icon: SquaresFour },
@@ -29,6 +31,7 @@ const links = [
   { to: '/compliance', label: 'Compliance', icon: ShieldCheck },
   { to: '/logs', label: 'Logs', icon: Scroll },
   { to: '/diagnostics', label: 'Diagnostics', icon: Stethoscope },
+  { to: '/decommission', label: 'Decommission', icon: Prohibit },
 ];
 
 const pageTitles = {
@@ -39,6 +42,7 @@ const pageTitles = {
   '/compliance': 'Compliance',
   '/logs': 'Logs',
   '/diagnostics': 'Diagnostics',
+  '/decommission': 'Decommission',
 };
 
 export default function App() {
@@ -116,6 +120,7 @@ export default function App() {
               <Route path="/compliance" element={<Compliance />} />
               <Route path="/logs" element={<Logs />} />
               <Route path="/diagnostics" element={<Diagnostics />} />
+              <Route path="/decommission" element={<Decommission />} />
             </Routes>
           </div>
         </main>

@@ -4,12 +4,12 @@ import { randomUUID } from 'node:crypto';
 
 export class DurableQueue {
   /**
-   * @param {string} dataDir
+   * @param {string} queueRoot base queue directory (…/queue)
    * @param {string} name
    * @param {object} [opts]
    */
-  constructor(dataDir, name, opts = {}) {
-    this.dir = join(dataDir, 'queue', name);
+  constructor(queueRoot, name, opts = {}) {
+    this.dir = join(queueRoot, name);
     this.spoolPath = join(this.dir, 'spool.jsonl');
     this.pendingPath = join(this.dir, 'pending.json');
     this.diskLimitMb = opts.diskLimitMb || 256;

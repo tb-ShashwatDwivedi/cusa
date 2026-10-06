@@ -1,5 +1,6 @@
 {
   "wazuh": {
+    "version": "4.11",
     "manager": {
       "address": "192.168.0.185",
       "port": 1514,

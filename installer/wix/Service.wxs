@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
+     xmlns:util="http://wixtoolset.org/schemas/v4/wxs/util">
+
+  <Fragment>
+    <Component Id="ServiceComponent" Directory="AgentDir" Guid="*">
+      <File Id="ServiceHostExe" Source="$(var.BuildRoot)\agent\cusa-service-host.exe" KeyPath="yes" />
+
+      <ServiceInstall
+        Id="CUSAAgentInstall"
+        Name="CUSAAgent"
+        DisplayName="CUSA Unified Security Agent"
+        Description="CyberSIO Unified Security Agent endpoint security and telemetry service."
+        Type="ownProcess"
+        Start="auto"
+        Account="LocalSystem"
+        ErrorControl="normal"
+        Vital="yes" />
+
+      <ServiceControl
+        Id="CUSAAgentControl"
+        Name="CUSAAgent"
+        Start="install"
+        Stop="both"
+        Remove="uninstall"
+        Wait="yes" />
+
+      <util:ServiceConfig
+        Name="CUSAAgent"
+        FirstFailureActionType="restart"
+        SecondFailureActionType="restart"
+        ThirdFailureActionType="restart"
+        ResetPeriodInDays="1"
+        RestartServiceDelayInSeconds="5" />
+    </Component>
+  </Fragment>
+</Wix>

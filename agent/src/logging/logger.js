@@ -1,5 +1,19 @@
 import pino from 'pino';
 import { eventLog } from './event-log.js';
+import { createFileLogStream, closeFileLogStream } from './file-log.js';
+
+let fileStream = null;
+
+/** @param {object} [opts] */
+export async function initFileLogging(logsDir) {
+  fileStream = await createFileLogStream(logsDir);
+  return fileStream;
+}
+
+export function shutdownFileLogging() {
+  closeFileLogStream();
+  fileStream = null;
+}
 
 /** @param {object} [opts] */
 export function createLogger(opts = {}) {
@@ -9,15 +23,20 @@ export function createLogger(opts = {}) {
     },
   };
 
+  const streams = [
+    { stream: process.stdout },
+    { stream: logSink, level: 'debug' },
+  ];
+  if (fileStream) {
+    streams.push({ stream: fileStream, level: opts.fileLevel || 'info' });
+  }
+
   return pino(
     {
       name: 'cusa',
       level: opts.level || 'info',
       redact: ['*.password', '*.key', '*.token', '*.secret', 'authorization'],
     },
-    pino.multistream([
-      { stream: process.stdout },
-      { stream: logSink, level: 'debug' },
-    ]),
+    pino.multistream(streams),
   );
 }

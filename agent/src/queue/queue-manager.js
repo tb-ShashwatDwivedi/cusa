@@ -1,17 +1,17 @@
 import { DurableQueue } from './durable-queue.js';
 
 export class QueueManager {
-  /** @param {string} dataDir @param {object} config */
-  constructor(dataDir, config) {
+  /** @param {string} queueRoot @param {object} config */
+  constructor(queueRoot, config) {
     const qOpts = {
       diskLimitMb: config.diskLimitMb,
       memoryLimit: config.memoryLimit,
       maxRetries: config.maxRetries,
     };
-    this.events = new DurableQueue(dataDir, 'events', qOpts);
-    this.state = new DurableQueue(dataDir, 'state', qOpts);
-    this.commands = new DurableQueue(dataDir, 'commands', qOpts);
-    this.results = new DurableQueue(dataDir, 'command-results', qOpts);
+    this.events = new DurableQueue(queueRoot, 'events', qOpts);
+    this.state = new DurableQueue(queueRoot, 'state', qOpts);
+    this.commands = new DurableQueue(queueRoot, 'commands', qOpts);
+    this.results = new DurableQueue(queueRoot, 'command-results', qOpts);
     this.flushIntervalMs = config.flushIntervalMs || 1000;
     this.maxRetries = config.maxRetries || 10;
     this.running = false;

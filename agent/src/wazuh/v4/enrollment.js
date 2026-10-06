@@ -9,6 +9,7 @@ import { saveSecrets, loadSecrets } from '../../security/secrets.js';
  * @param {string} [opts.password]
  * @param {string} [opts.groups]
  * @param {string} [opts.ca]
+ * @param {string} [opts.agentVersion] Wazuh-style V: field (e.g. Wazuh v4.11.2)
  */
 export function enroll(opts) {
   return new Promise((resolve, reject) => {
@@ -21,7 +22,7 @@ export function enroll(opts) {
     const socket = tls.connect(tlsOpts, () => {
       let msg = `OSSEC A:'${opts.agentName}'`;
       if (opts.groups) msg += ` G:'${opts.groups}'`;
-      msg += ` V:'CUSA-0.1.0'`;
+      msg += ` V:'${opts.agentVersion || 'Wazuh v4.11.2'}'`;
       if (opts.password) msg = `OSSEC PASS: ${opts.password} ${msg}`;
       const buf = Buffer.from(msg, 'utf8');
       const header = Buffer.alloc(4);

@@ -2,9 +2,9 @@ import { readFile, writeFile, mkdir } from 'node:fs/promises';
 import { join, dirname } from 'node:path';
 
 export class StateStore {
-  /** @param {string} dataDir */
-  constructor(dataDir) {
-    this.path = join(dataDir, 'state.json');
+  /** @param {string} statePath full path to state.json */
+  constructor(statePath) {
+    this.path = statePath.endsWith('.json') ? statePath : join(statePath, 'state.json');
     this.data = {
       globalCounter: 0,
       localCounter: 0,

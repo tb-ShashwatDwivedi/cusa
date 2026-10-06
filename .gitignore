@@ -3,6 +3,7 @@ agent/node_modules/
 gui/node_modules/
 agent/config/config.local.json
 **/.cusa/
+build/
 dist/
 gui/dist/
 src-tauri/target/

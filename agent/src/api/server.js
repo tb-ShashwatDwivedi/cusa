@@ -3,6 +3,14 @@ import { eventLog } from '../logging/event-log.js';
 
 // GUI dev (Vite/Tauri) runs on a different origin than the local API.
 const LOCAL_ORIGIN = /^(https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?|tauri:\/\/localhost)$/;
+const LOOPBACK = /^(127\.\d+\.\d+\.\d+|::1|::ffff:127\.\d+\.\d+\.\d+)$/;
+
+/** @param {import('fastify').FastifyRequest} req */
+function isLoopback(req) {
+  const addr = req.socket?.remoteAddress;
+  if (!addr) return true; // in-process (tests, IPC)
+  return LOOPBACK.test(addr);
+}
 
 /** @param {import('fastify').FastifyInstance} app */
 export function allowLocalCors(app) {
@@ -25,9 +33,23 @@ export async function createApiServer(agent) {
   const app = Fastify({ logger: false });
   allowLocalCors(app);
   const host = agent.config.api?.host || '127.0.0.1';
-  const port = agent.config.api?.port || 8710;
+  const port = agent.config.api?.port ?? 8710;
+
+  app.addHook('onRequest', async (req, reply) => {
+    if (!isLoopback(req)) {
+      return reply.code(403).send({ error: 'Local API is localhost-only' });
+    }
+  });
 
   app.get('/api/status', async () => agent.getStatus());
+  app.get('/api/deploy', async () => ({
+    deploy: agent.config.deploy,
+    manager: agent.config.wazuh?.manager,
+    paths: {
+      dataDir: agent.config.agent?.dataDir,
+      logs: agent.paths?.logs,
+    },
+  }));
   app.get('/api/health', async () => agent.health.check());
   app.get('/api/metrics', async () => agent.metrics.snapshot());
   app.get('/api/collectors', async () => {
@@ -90,6 +112,21 @@ export async function createApiServer(agent) {
     platform: process.platform,
     pid: process.pid,
   }));
+
+  app.post('/api/decommission/purge', async (req, reply) => {
+    const body = req.body || {};
+    if (body.confirm !== 'DECOMMISSION') {
+      return reply.code(400).send({
+        error: 'Confirmation required: send { "confirm": "DECOMMISSION" }',
+      });
+    }
+    try {
+      const result = await agent.decommission({ includeLogs: body.includeLogs === true });
+      return { ok: true, ...result };
+    } catch (err) {
+      return reply.code(500).send({ error: err.message });
+    }
+  });
 
   await app.listen({ host, port });
   agent.logger.info({ host, port }, 'Local API listening');

@@ -1,4 +1,3 @@
-import { join } from 'node:path';
 import { WazuhClient } from '../wazuh/client.js';
 import { StateStore } from '../state/store.js';
 import { QueueManager } from '../queue/queue-manager.js';
@@ -24,22 +23,27 @@ import {
   saveLocalConfig,
   applyPatch,
   flattenPatch,
+  getPaths,
 } from '../config/loader.js';
+import { purgeAgentData } from '../platform/decommission.js';
+
+export const AGENT_VERSION = '1.0.0';
 
 export class Agent {
   /** @param {object} config @param {import('pino').Logger} logger */
   constructor(config, logger) {
     this.config = config;
+    this.paths = config._paths || getPaths(config.agent.dataDir);
     this.logger = logger;
     this.metrics = new Metrics();
     this.health = new HealthMonitor(this.metrics);
-    this.state = new StateStore(config.agent.dataDir);
-    this.queue = new QueueManager(config.agent.dataDir, config.queue);
+    this.state = new StateStore(this.paths.state);
+    this.queue = new QueueManager(this.paths.queue, config.queue);
     this.wazuh = new WazuhClient({
       version: config.wazuh.version,
       manager: config.wazuh.manager,
       enrollment: config.wazuh.enrollment,
-      dataDir: config.agent.dataDir,
+      dataDir: this.paths.secrets,
       agentName: config.agent.name,
       state: this.state,
       metrics: this.metrics,
@@ -55,18 +59,14 @@ export class Agent {
       onRestart: () => process.exit(0),
       onReload: async () => this.reloadConfig(),
     });
-    const tamperPaths = [
-      process.execPath,
-      join(config.agent.dataDir, 'state.json'),
-      join(config.agent.dataDir, 'secrets.enc'),
-    ];
+    const tamperPaths = [process.execPath, this.paths.state, this.paths.secrets];
     this.tamper = new TamperDetector({
       paths: tamperPaths,
       onTamper: (a) => this.handleTamper(a),
     });
     this.updater = new Updater({
-      dataDir: config.agent.dataDir,
-      currentVersion: '0.1.0',
+      dataDir: this.paths.updates,
+      currentVersion: AGENT_VERSION,
       onApply: async () => {
         this.tamper.setUpdateInProgress(false);
         eventLog.agent('Update staged; restart required to apply', {}, 'warn');
@@ -81,13 +81,7 @@ export class Agent {
     await this.state.load();
     await this.queue.init();
     await this.wazuh.init();
-
-    this.wazuh.onCommand?.(async (parsed) => {
-      if (parsed.taskId && this.state.hasTaskId(parsed.taskId)) return;
-      await this.queue.enqueueCommand({ parsed, receivedAt: Date.now() });
-      this.metrics.inc('commandsReceived');
-      await this.processCommands();
-    });
+    this.registerWazuhHandlers();
 
     this.collectors = createCollectors(this.config, this.state);
     for (const c of this.collectors) {
@@ -126,6 +120,15 @@ export class Agent {
       api: `http://${this.config.api?.host || '127.0.0.1'}:${this.config.api?.port || 8710}`,
     });
     this.logger.info('CUSA agent running');
+  }
+
+  registerWazuhHandlers() {
+    this.wazuh.onCommand?.(async (parsed) => {
+      if (parsed.taskId && this.state.hasTaskId(parsed.taskId)) return;
+      await this.queue.enqueueCommand({ parsed, receivedAt: Date.now() });
+      this.metrics.inc('commandsReceived');
+      await this.processCommands();
+    });
   }
 
   async ingestEvent(partial) {
@@ -218,7 +221,7 @@ export class Agent {
 
   /** @param {object} patch nested partial config update */
   async patchConfig(patch) {
-    const overlay = await loadLocalOverlay(this.config.agent.dataDir);
+    const overlay = await loadLocalOverlay(this.paths.configLocal);
     const merged = applyPatch(overlay, patch, this.config.locked || []);
     await saveLocalConfig(merged, this.config.agent.dataDir);
     await this.reloadConfig();
@@ -237,6 +240,11 @@ export class Agent {
       if (this.config.collectors?.[c.name]?.enabled !== false) await c.start();
     }
     await this.compliance.load();
+    this.wazuh.options.manager = this.config.wazuh.manager;
+    this.wazuh.options.enrollment = this.config.wazuh.enrollment;
+    await this.wazuh.close();
+    await this.wazuh.init();
+    this.registerWazuhHandlers();
     eventLog.agent('Configuration reloaded');
     this.logger.info('Config reload complete');
   }
@@ -246,15 +254,31 @@ export class Agent {
     return {
       agentId: identity?.id || this.state.data.enrollment?.agentId,
       hostname: this.config.agent.name,
-      version: '0.1.0',
-      enrollment: identity ? 'enrolled' : this.state.data.enrollment?.status || 'pending',
+      version: AGENT_VERSION,
+      enrollment: identity
+        ? 'enrolled'
+        : this.state.data.enrollment?.status === 'pending'
+          ? 'pending'
+          : this.state.data.enrollment?.status || 'pending',
       manager: this.config.wazuh.manager?.address,
+      deploy: this.config.deploy,
+      dataDir: this.config.agent.dataDir,
+      logDir: this.paths.logs,
       transportConnected: this.metrics.transportConnected,
       configVersion: this.state.data.configVersion,
       lastSync: this.state.data.lastSync,
       metrics: this.metrics.snapshot(),
       queue: { depth: this.queue.totalDepth() },
     };
+  }
+
+  /** @param {{ includeLogs?: boolean }} [opts] */
+  async decommission(opts = {}) {
+    eventLog.agent('Decommission purge started', {}, 'warn');
+    await this.stop();
+    const result = await purgeAgentData(this.paths, opts);
+    eventLog.agent('Decommission purge complete', result, 'warn');
+    return result;
   }
 
   async stop() {

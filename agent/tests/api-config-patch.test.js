@@ -10,7 +10,7 @@ describe('api config patch', () => {
 
   before(async () => {
     const agent = {
-      config: { locked: ['collectors.sysmon'], agent: { dataDir } },
+      config: { locked: ['collectors.sysmon'], agent: { dataDir }, api: { host: '127.0.0.1', port: 0 } },
       logger: createLogger({ level: 'silent' }),
       getStatus: () => ({}),
       health: { check: async () => ({}) },
