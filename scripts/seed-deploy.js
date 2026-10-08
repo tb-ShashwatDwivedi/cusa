@@ -30,7 +30,7 @@ await writeDeployOverlay(paths.deploy, {
       port: Number(arg('--port', '1514')),
       enrollmentPort: Number(arg('--enrollment-port', '1515')),
     },
-    version: arg('--wazuh-version', '5.x-released'),
+    version: arg('--wazuh-version', '4.11'),
   },
 });
 

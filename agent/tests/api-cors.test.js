@@ -16,6 +16,23 @@ test('allows localhost GUI origins', async () => {
 
   assert.equal(res.statusCode, 200);
   assert.equal(res.headers['access-control-allow-origin'], 'http://localhost:1420');
+  assert.match(res.headers['access-control-allow-methods'], /POST/);
+  await app.close();
+});
+
+test('allows Tauri production GUI origin', async () => {
+  const app = Fastify();
+  allowLocalCors(app);
+  app.get('/api/status', async () => ({ ok: true }));
+
+  const res = await app.inject({
+    method: 'GET',
+    url: '/api/status',
+    headers: { origin: 'http://tauri.localhost' },
+  });
+
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.headers['access-control-allow-origin'], 'http://tauri.localhost');
   await app.close();
 });
 

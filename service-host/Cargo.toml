@@ -1,0 +1,11 @@
+[package]
+name = "cusa-service-host"
+version = "1.0.0"
+edition = "2021"
+
+[[bin]]
+name = "cusa-service-host"
+path = "src/main.rs"
+
+[dependencies]
+windows-service = "0.7"

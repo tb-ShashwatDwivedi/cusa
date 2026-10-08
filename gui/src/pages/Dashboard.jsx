@@ -1,3 +1,4 @@
+import { useState } from 'react';
 import { api } from '../services/api.js';
 import { usePoll } from '../hooks/usePoll.js';
 import {
@@ -8,6 +9,7 @@ import {
   StatCard,
   StatusPill,
 } from '../components/ui.jsx';
+import { EnrollmentStatus, enrollmentLabel, enrollmentTone } from '../components/enrollment.jsx';
 
 function fmt(value, fallback = 'n/a') {
   if (value === null || value === undefined || value === '') return fallback;
@@ -18,14 +20,24 @@ export default function Dashboard() {
   const { data: status, error, loading } = usePoll(() => api.status());
   const { data: queue, loading: queueLoading } = usePoll(() => api.queue());
   const { data: health, loading: healthLoading } = usePoll(() => api.health());
+  const { data: service } = usePoll(() => api.service(), 5000);
+  const [svcBusy, setSvcBusy] = useState(false);
+  const [svcError, setSvcError] = useState(null);
+  const [svcMessage, setSvcMessage] = useState(null);
 
-  if (error) {
-    return (
-      <ErrorBanner>
-        Agent unreachable: {error}. Start the agent service before opening the console.
-      </ErrorBanner>
-    );
-  }
+  const runServiceAction = async (action) => {
+    setSvcBusy(true);
+    setSvcError(null);
+    setSvcMessage(null);
+    try {
+      const result = await api.serviceControl(action);
+      setSvcMessage(result.message || `${action} requested`);
+    } catch (err) {
+      setSvcError(err.message);
+    } finally {
+      setSvcBusy(false);
+    }
+  };
 
   const connected = status?.transportConnected;
   const metrics = status?.metrics || {};
@@ -37,7 +49,45 @@ export default function Dashboard() {
       <PageHeader
         title="Operations overview"
         description="Live agent identity, connectivity, and runtime metrics from the local endpoint service."
+        actions={
+          <div className="service-controls">
+            <button
+              type="button"
+              className="btn-secondary"
+              disabled={svcBusy || service?.state === 'running'}
+              onClick={() => runServiceAction('start')}
+            >
+              Start
+            </button>
+            <button
+              type="button"
+              className="btn-secondary"
+              disabled={svcBusy || (!service?.processRunning && service?.state !== 'running')}
+              onClick={() => runServiceAction('stop')}
+            >
+              Stop
+            </button>
+            <button
+              type="button"
+              className="btn-secondary"
+              disabled={svcBusy}
+              onClick={() => runServiceAction('restart')}
+            >
+              Restart
+            </button>
+          </div>
+        }
       />
+
+      {error && (
+        <ErrorBanner>
+          Agent unreachable: {error}. Use Start below if the Windows service is stopped.
+        </ErrorBanner>
+      )}
+      {svcError && <ErrorBanner>{svcError}</ErrorBanner>}
+      {svcMessage && (
+        <div className="success-banner" role="status">{svcMessage}</div>
+      )}
 
       <div className="hero-strip">
         <div className="hero-strip-main">
@@ -47,6 +97,13 @@ export default function Dashboard() {
           </span>
         </div>
         <div className="hero-strip-badges">
+          <EnrollmentStatus
+            status={status?.enrollment}
+            agentId={status?.agentId}
+            manager={status?.manager}
+            connected={connected}
+            compact
+          />
           <StatusPill
             label={connected ? 'Manager connected' : 'Manager disconnected'}
             tone={connected ? 'ok' : 'err'}
@@ -66,9 +123,10 @@ export default function Dashboard() {
           <StatCard label="Version" value={fmt(status?.version)} loading={busy && !status} mono />
           <StatCard
             label="Enrollment"
-            value={fmt(status?.enrollment)}
+            value={enrollmentLabel(status?.enrollment)}
+            hint={status?.agentId ? `ID ${status.agentId}` : undefined}
             loading={busy && !status}
-            tone="accent"
+            tone={enrollmentTone(status?.enrollment, connected)}
           />
         </MetricGrid>
       </Section>

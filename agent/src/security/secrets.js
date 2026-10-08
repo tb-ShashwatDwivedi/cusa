@@ -1,8 +1,20 @@
 import { readFile, writeFile, mkdir } from 'node:fs/promises';
 import { join, dirname } from 'node:path';
 import { createCipheriv, createDecipheriv, randomBytes, scryptSync } from 'node:crypto';
+import { getMachineSecret } from './dpapi.js';
 
 const SALT = 'cusa-secrets-v1';
+let encryptionSeed = null;
+
+/** @param {string} cacheDir */
+export async function initSecretsEncryption(cacheDir) {
+  encryptionSeed = await getMachineSecret(cacheDir);
+}
+
+function deriveKey() {
+  const seed = encryptionSeed || process.env.CUSA_SECRET || 'cusa-local-key';
+  return scryptSync(seed, SALT, 32);
+}
 
 /** @param {string} secretsPath full path to secrets.enc */
 export function secretsPath(secretsPathOrDir) {
@@ -12,7 +24,7 @@ export function secretsPath(secretsPathOrDir) {
 /** @param {string} secretsFile @param {object} secrets */
 export async function saveSecrets(secretsFile, secrets) {
   const file = secretsPath(secretsFile);
-  const key = scryptSync(process.env.CUSA_SECRET || 'cusa-local-key', SALT, 32);
+  const key = deriveKey();
   const iv = randomBytes(16);
   const cipher = createCipheriv('aes-256-gcm', key, iv);
   const payload = Buffer.concat([cipher.update(JSON.stringify(secrets), 'utf8'), cipher.final()]);
@@ -28,7 +40,7 @@ export async function loadSecrets(secretsFile) {
     const iv = buf.subarray(0, 16);
     const tag = buf.subarray(16, 32);
     const data = buf.subarray(32);
-    const key = scryptSync(process.env.CUSA_SECRET || 'cusa-local-key', SALT, 32);
+    const key = deriveKey();
     const decipher = createDecipheriv('aes-256-gcm', key, iv);
     decipher.setAuthTag(tag);
     const json = Buffer.concat([decipher.update(data), decipher.final()]).toString('utf8');

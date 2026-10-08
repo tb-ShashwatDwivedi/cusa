@@ -1,4 +1,4 @@
-import { useMemo } from 'react';
+import { useEffect, useMemo } from 'react';
 import { NavLink, Routes, Route, useLocation } from 'react-router-dom';
 import {
   SquaresFour,
@@ -11,9 +11,10 @@ import {
   Scroll,
   Prohibit,
 } from '@phosphor-icons/react';
-import { api } from './services/api.js';
+import { api, setApiToken } from './services/api.js';
 import { usePoll } from './hooks/usePoll.js';
 import { StatusPill } from './components/ui.jsx';
+import { EnrollmentStatus } from './components/enrollment.jsx';
 import Dashboard from './pages/Dashboard.jsx';
 import Collectors from './pages/Collectors.jsx';
 import Configuration from './pages/Configuration.jsx';
@@ -49,11 +50,22 @@ export default function App() {
   const location = useLocation();
   const { data: status, error } = usePoll(() => api.status(), 5000);
 
+  useEffect(() => {
+    if (status?.localApiToken) setApiToken(status.localApiToken);
+  }, [status?.localApiToken]);
+
+  const serviceUp = !error && status?.serviceRunning !== false;
   const connected = status?.transportConnected;
   const pageTitle = pageTitles[location.pathname] || 'CUSA Agent';
 
   const connectionTone = error ? 'err' : connected ? 'ok' : 'warn';
-  const connectionLabel = error ? 'Agent offline' : connected ? 'Connected' : 'Disconnected';
+  const connectionLabel = error
+    ? 'Service offline'
+    : connected
+      ? 'Manager connected'
+      : 'Manager disconnected';
+  const serviceLabel = serviceUp ? 'Service running' : 'Service offline';
+  const serviceTone = serviceUp ? 'ok' : 'err';
 
   const lastSync = useMemo(() => {
     if (!status?.lastSync) return null;
@@ -96,6 +108,14 @@ export default function App() {
 
         <div className="sidebar-footer">
           <div className="agent-mini">
+            <StatusPill label={serviceLabel} tone={serviceTone} pulse={serviceUp} />
+            <EnrollmentStatus
+              status={status?.enrollment}
+              agentId={status?.agentId}
+              manager={status?.manager}
+              connected={connected}
+              compact
+            />
             <StatusPill label={connectionLabel} tone={connectionTone} pulse={connected && !error} />
           </div>
         </div>
@@ -106,6 +126,14 @@ export default function App() {
           <span className="topbar-title">{pageTitle}</span>
           <div className="topbar-meta">
             {lastSync && <span className="sync-time">Synced {lastSync}</span>}
+            <StatusPill label={serviceLabel} tone={serviceTone} pulse={serviceUp} />
+            <EnrollmentStatus
+              status={status?.enrollment}
+              agentId={status?.agentId}
+              manager={status?.manager}
+              connected={connected}
+              compact
+            />
             <StatusPill label={connectionLabel} tone={connectionTone} pulse={connected && !error} />
           </div>
         </header>

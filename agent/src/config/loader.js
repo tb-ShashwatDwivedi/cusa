@@ -5,6 +5,7 @@ import os from 'node:os';
 import { defaultDataRoot, resolvePaths } from '../platform/paths.js';
 import { loadDeployOverlay } from '../platform/deploy.js';
 import { migrateDataLayout, migrateConfigSchema, saveConfigWithBackup } from './migrate.js';
+import { applyFixedEnrollment } from '../wazuh/enrollment-defaults.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const DEFAULT_CONFIG = join(__dirname, '../../config/default.json');
@@ -133,6 +134,7 @@ export async function loadConfig(path) {
   const mergedLocal = migrateConfigSchema(deepMerge(deploy, localOverlay));
 
   config = deepMerge(config, mergedLocal);
+  applyFixedEnrollment(config);
   config.agent = { ...config.agent, dataDir, name: config.agent?.name || os.hostname() };
   config._paths = paths;
   config.deploy = deploy.source ? { source: deploy.source, deployedAt: deploy.deployedAt } : null;

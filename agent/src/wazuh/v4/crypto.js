@@ -47,9 +47,14 @@ function stripAgentPrefix(data) {
   return data.subarray(end + 1);
 }
 
+/** Wazuh client.keys IDs are 3-digit zero-padded. */
+export function padAgentId(agentId) {
+  return String(agentId ?? '').padStart(3, '0');
+}
+
 /** @param {string} agentId @param {Buffer} aesPayload payload starting with #AES: */
 export function wrapAgentPayload(agentId, aesPayload) {
-  return Buffer.concat([Buffer.from(`!${agentId}!`), aesPayload]);
+  return Buffer.concat([Buffer.from(`!${padAgentId(agentId)}!`), aesPayload]);
 }
 
 /** @param {string} plaintext @param {{global:number,local:number}} counters @param {Buffer} key @param {string} [agentId] */

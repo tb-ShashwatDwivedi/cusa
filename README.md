@@ -53,13 +53,24 @@ Open http://localhost:1420 — requires agent running on port 8710.
 
 ### 3. GUI (Tauri desktop)
 
-Requires [Rust](https://rustup.rs/) and Tauri CLI:
+Requires [Rust](https://rustup.rs/):
 
 ```bash
-cargo install tauri-cli
-cd gui && npm install && npm run build
-cd ../src-tauri && cargo tauri dev
+npm run tauri:dev    # from repo root
 ```
+
+Release GUI for MSI: `npm run build:gui` → output at `build/gui/CUSA.exe`. See [BUILD.md](docs/BUILD.md).
+
+### 4. Windows MSI install
+
+```powershell
+npm run build:release
+msiexec /i dist\CUSA-x64-1.0.0.msi
+```
+
+Full MSI installs the `CUSAAgent` service, `CUSA.exe`, and shortcuts. Agent-only: `$env:SKIP_GUI = "1"; npm run build:release`.
+
+See [windows-installation.md](docs/windows-installation.md) and [BUILD.md](docs/BUILD.md).
 
 ## Features
 
@@ -73,9 +84,25 @@ cd ../src-tauri && cargo tauri dev
 - Localhost-only diagnostics API
 - Tauri GUI: Dashboard, Collectors, Config, FIM, Compliance, Diagnostics
 
+## Windows release build
+
+```powershell
+npm ci
+npm run build:release          # full MSI — agent + GUI + shortcuts (WiX 4 + Rust)
+$env:SKIP_GUI = "1"            # agent-only MSI, faster (no CUSA.exe)
+npm run build:release
+```
+
+Build GUI only: `npm run build:gui` (Tauri → `build/gui/CUSA.exe`).
+
+See **[BUILD.md](docs/BUILD.md)** for prerequisites, step-by-step builds, and install commands.
+
 ## Documentation
 
 - **[Complete User Guide](docs/user-guide.md)** — start here: setup, every agent module, GUI pages, API reference, troubleshooting
+- **[Windows Build Guide](docs/BUILD.md)** — MSI release pipeline
+- [Enterprise Deployment](docs/enterprise-deployment.md)
+- [Windows Installation](docs/windows-installation.md)
 - [Architecture](docs/architecture.md)
 - [Wazuh Compatibility](docs/wazuh-compatibility.md)
 - [Event Schema](docs/event-schema.md)

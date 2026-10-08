@@ -6,6 +6,8 @@ import { serializeEvent } from './event-serializer.js';
 import { runSync } from './sync-protocol.js';
 import { getProtocolProfile } from '../version.js';
 import { parseManagerCommand, formatCommandAck } from './commands.js';
+import { padAgentId } from './crypto.js';
+import { FIXED_ENROLLMENT } from '../enrollment-defaults.js';
 import { eventLog } from '../../logging/event-log.js';
 
 export class WazuhAdapter {
@@ -23,6 +25,7 @@ export class WazuhAdapter {
     this.health = options.health;
     this.enrollShouldRun = false;
     this.enrollDelayMs = 5000;
+    this.keepaliveTimer = null;
     this.profile = getProtocolProfile(
       options.version || '4.x',
       options.enrollment,
@@ -56,6 +59,7 @@ export class WazuhAdapter {
       this.identity = await this.enroll();
     }
     if (this.identity) {
+      this.identity.id = padAgentId(this.identity.id);
       this.encKey = deriveEncryptionKey(this.identity.key, this.identity.name, this.identity.id);
       this.startTransport();
     } else if (manager.address) {
@@ -87,8 +91,10 @@ export class WazuhAdapter {
       this.logger?.info('Connected to Wazuh manager');
       this.metrics && (this.metrics.transportConnected = true);
       this.health?.setTransport('connected');
+      this.sendHandshake();
     });
     this.transport.on('disconnect', () => {
+      this.stopKeepalive();
       eventLog.agent(`Disconnected from manager ${manager.address}:${manager.port}`, {
         host: manager.address,
         port: manager.port,
@@ -131,11 +137,42 @@ export class WazuhAdapter {
     setTimeout(tick, this.enrollDelayMs);
   }
 
-  async enroll() {
-    const { manager, enrollment } = this.options;
-    const groups = (enrollment?.groups || ['default']).join(',');
+  sendHandshake() {
+    if (!this.encKey || !this.identity) return;
+    try {
+      this.sendPlaintext('#!-agent startup {"version":"v4.11.2"}');
+    } catch (err) {
+      this.logger?.warn({ err }, 'Failed to send agent startup');
+      return;
+    }
+    this.startKeepalive();
+  }
 
-    if (enrollment?.apiUser && enrollment?.apiPassword) {
+  startKeepalive() {
+    this.stopKeepalive();
+    this.keepaliveTimer = setInterval(() => {
+      try {
+        this.sendPlaintext('#!-agent keepalive\n');
+      } catch {
+        // reconnect path will handshake again
+      }
+    }, 10000);
+    this.keepaliveTimer.unref?.();
+  }
+
+  stopKeepalive() {
+    if (this.keepaliveTimer) {
+      clearInterval(this.keepaliveTimer);
+      this.keepaliveTimer = null;
+    }
+  }
+
+  async enroll() {
+    const { manager } = this.options;
+    const enrollment = { ...FIXED_ENROLLMENT, ...this.options.enrollment, ...FIXED_ENROLLMENT };
+    const groups = (enrollment.groups || ['default']).join(',');
+
+    if (enrollment.apiUser && enrollment.apiPassword) {
       try {
         this.identity = await enrollViaApi({
           host: manager.address,
@@ -143,7 +180,7 @@ export class WazuhAdapter {
           agentName: this.options.agentName,
           user: enrollment.apiUser,
           password: enrollment.apiPassword,
-          insecure: enrollment.insecure === true,
+          insecure: enrollment.insecure !== false,
         });
         eventLog.agent('Enrolled via Wazuh API', { agentId: this.identity.id, name: this.identity.name });
         this.logger?.info('Enrolled via Wazuh API');
@@ -170,6 +207,7 @@ export class WazuhAdapter {
         return null;
       }
     }
+    this.identity.id = padAgentId(this.identity.id);
     await persistIdentity(this.options.dataDir, this.identity);
     this.encKey = deriveEncryptionKey(this.identity.key, this.identity.name, this.identity.id);
     this.state.data.enrollment = { status: 'enrolled', agentId: this.identity.id, name: this.identity.name };
@@ -246,6 +284,7 @@ export class WazuhAdapter {
 
   async close() {
     this.enrollShouldRun = false;
+    this.stopKeepalive();
     this.transport?.stop();
     this.transport = null;
   }

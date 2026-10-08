@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+
+  <Fragment>
+    <StandardDirectory Id="ProgramFiles6432Folder">
+      <Directory Id="INSTALLDIR" Name="CUSA">
+        <Directory Id="AgentDir" Name="agent">
+          <Directory Id="AgentConfigDir" Name="config" />
+        </Directory>
+        <Directory Id="GuiDir" Name="gui" />
+        <Directory Id="UpdaterDir" Name="updater" />
+        <Directory Id="InstallerDir" Name="installer">
+          <Directory Id="InstallerScriptsDir" Name="scripts" />
+        </Directory>
+      </Directory>
+    </StandardDirectory>
+
+    <StandardDirectory Id="ProgramMenuFolder">
+      <Directory Id="CusaProgramMenuDir" Name="CUSA" />
+    </StandardDirectory>
+  </Fragment>
+
+</Wix>

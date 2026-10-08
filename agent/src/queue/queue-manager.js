@@ -110,4 +110,28 @@ export class QueueManager {
   stop() {
     this.running = false;
   }
+
+  /** Best-effort flush before shutdown. @param {import('../wazuh/client.js').WazuhClient} wazuh @param {number} [timeoutMs] */
+  async drain(wazuh, timeoutMs = 15000) {
+    this.running = false;
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline && this.totalDepth() > 0) {
+      const batch = [];
+      for (let i = 0; i < 50; i++) {
+        const item = await this.events.dequeue();
+        if (!item) break;
+        batch.push(item);
+      }
+      if (batch.length) {
+        try {
+          await wazuh.sendEvents(batch.map((b) => b.payload));
+          for (const item of batch) await this.events.ack(item.id);
+        } catch {
+          for (const item of batch) await this.events.requeue(item.id);
+          break;
+        }
+      }
+      await new Promise((r) => setTimeout(r, 200));
+    }
+  }
 }

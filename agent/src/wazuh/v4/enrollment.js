@@ -61,3 +61,10 @@ export async function loadIdentity(dataDir) {
   const secrets = await loadSecrets(dataDir);
   return secrets.identity || null;
 }
+
+/** Drop stored agent identity (e.g. after manager address change). */
+export async function clearIdentity(dataDir) {
+  const secrets = await loadSecrets(dataDir);
+  delete secrets.identity;
+  await saveSecrets(dataDir, secrets);
+}

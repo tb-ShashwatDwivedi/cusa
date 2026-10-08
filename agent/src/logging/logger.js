@@ -1,6 +1,7 @@
 import pino from 'pino';
 import { eventLog } from './event-log.js';
 import { createFileLogStream, closeFileLogStream } from './file-log.js';
+import { istTimestamp } from './ist.js';
 
 let fileStream = null;
 
@@ -35,6 +36,7 @@ export function createLogger(opts = {}) {
     {
       name: 'cusa',
       level: opts.level || 'info',
+      timestamp: () => `,"time":"${istTimestamp()}"`,
       redact: ['*.password', '*.key', '*.token', '*.secret', 'authorization'],
     },
     pino.multistream(streams),

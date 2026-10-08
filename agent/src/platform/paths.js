@@ -5,9 +5,17 @@ import { access } from 'node:fs/promises';
 export const PROGRAM_DATA_WIN = 'C:\\ProgramData\\CUSA';
 export const PROGRAM_FILES_WIN = 'C:\\Program Files\\CUSA';
 
+/** Packaged agent exe (service or console), not `node` from npm start. */
+export function isPackagedAgent() {
+  const exe = process.execPath.toLowerCase();
+  return exe.endsWith('cusa-agent.exe') || exe.endsWith('cusa-agent');
+}
+
 /** @returns {Promise<string>} */
 export async function defaultDataRoot() {
   if (process.env.CUSA_DATA_DIR) return process.env.CUSA_DATA_DIR;
+  // Dev (`npm start`) must not use ProgramData — MSI marker exists but user lacks write ACL.
+  if (!isPackagedAgent()) return join(os.homedir(), '.cusa');
   if (process.platform === 'win32') {
     try {
       await access(join(PROGRAM_DATA_WIN, '.install-marker'));

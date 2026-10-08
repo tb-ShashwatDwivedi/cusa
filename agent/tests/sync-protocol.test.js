@@ -14,7 +14,7 @@ describe('sync protocol', () => {
     });
     assert.equal(result.mode, 'legacy');
     assert.equal(sent.length, 1);
-    assert.ok(sent[0].startsWith('d:wazuh-states-inventory-system:'));
+    assert.ok(sent[0].startsWith('d:syscollector:'));
     assert.ok(!sent[0].includes('#SYNC'));
   });
 });

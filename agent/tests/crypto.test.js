@@ -28,6 +28,8 @@ describe('wazuh v4 crypto', () => {
     const key = deriveEncryptionKey('testkey12345678901234567890123456789012', 'agent1', '003');
     const encrypted = encryptMessage('1:a:b', { global: 12, local: 3 }, key, '003');
     assert.equal(encrypted.subarray(0, 5).toString(), '!003!');
+    const unpadded = encryptMessage('1:a:b', { global: 12, local: 3 }, key, '3');
+    assert.equal(unpadded.subarray(0, 5).toString(), '!003!');
     assert.equal(encrypted.subarray(5, 10).toString(), '#AES:');
   });
 

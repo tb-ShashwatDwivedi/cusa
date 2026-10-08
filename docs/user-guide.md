@@ -91,13 +91,40 @@ npm install
 
 ### 3.3 GUI (Tauri desktop — optional)
 
-Requires [Rust](https://rustup.rs/) and Tauri CLI:
+Requires [Rust](https://rustup.rs/):
 
 ```bash
-cargo install tauri-cli
+# From repo root (recommended)
+npm run tauri:dev
+```
+
+Or manually:
+
+```bash
 cd gui && npm run build
 cd ../src-tauri && cargo tauri dev
 ```
+
+Tauri config: `frontendDist` is `../gui/dist`; release exe is `src-tauri/target/release/cusa-gui.exe`, copied to `build/gui/CUSA.exe` by `npm run build:gui`.
+
+### 3.4 Windows MSI install (production)
+
+Build the MSI on a release machine — see [BUILD.md](BUILD.md):
+
+```powershell
+npm ci
+npm run build:release
+msiexec /i dist\CUSA-x64-1.0.0.msi
+```
+
+After install:
+
+- Service: `CUSAAgent` (auto-start)
+- GUI: `C:\Program Files\CUSA\gui\CUSA.exe` (full MSI only)
+- Data: `C:\ProgramData\CUSA\`
+- Configure manager/enrollment in GUI **Configuration**
+
+Agent-only MSI (no GUI): built with `SKIP_GUI=1` — see [windows-installation.md](windows-installation.md).
 
 ---
 
@@ -109,8 +136,11 @@ Configuration is merged from several layers (lowest priority first):
 |-------|--------|------------------|
 | Defaults | `agent/config/default.json` | No |
 | Repo-local override | `agent/config/config.local.json` | No (dev/deploy file) |
-| Runtime overlay | `~/.cusa/config.local.json` (or custom `dataDir`) | **Yes** — saved by GUI/API |
+| MSI deploy overlay | `C:\ProgramData\CUSA\config\deploy.json` | No (from `MANAGER_ADDRESS` at install) |
+| Runtime overlay | `{dataDir}/config.local.json` | **Yes** — saved by GUI/API |
 | Locked policy | `locked` array in config | Manager/CyberSIO only |
+
+On MSI-installed endpoints, `dataDir` defaults to **`C:\ProgramData\CUSA`**. Dev runs use **`~/.cusa`** unless overridden.
 
 ### 4.1 First-time manager setup
 
@@ -705,23 +735,37 @@ Shows combined `/api/diagnostics` payload: status, health, Node version, platfor
 
 ### 9.9 Tauri desktop app
 
-The Tauri shell wraps the same GUI. CSP allows connections to `127.0.0.1:8710`. The agent must be started separately (Tauri does not auto-start the agent service yet).
+The Tauri shell wraps the same GUI. CSP allows connections to `127.0.0.1:8710`.
+
+| Mode | Agent | GUI |
+|------|-------|-----|
+| Dev (`npm run tauri:dev`) | Start separately (`npm start` in `agent/`) | Tauri window |
+| MSI install | `CUSAAgent` Windows service | `CUSA.exe` shortcuts; service auto-starts |
+
+The Tauri dev shell does not auto-start the agent process. MSI installs register the agent as a Windows service.
 
 ---
 
 ## 10. Data & file locations
 
-Default data directory: **`~/.cusa`** (override with `agent.dataDir` in config).
+Default data directory:
+
+| Install type | `dataDir` |
+|--------------|-----------|
+| MSI / service | `C:\ProgramData\CUSA` |
+| Dev (`npm start`) | `~/.cusa` (override with `agent.dataDir` in config) |
 
 | Path | Contents |
 |------|----------|
-| `~/.cusa/state.json` | Counters, bookmarks, FIM baseline, inventory snapshot, task IDs |
-| `~/.cusa/secrets.enc` | Encrypted enrollment identity |
-| `~/.cusa/config.local.json` | GUI/API config overlay |
-| `~/.cusa/queue/events/` | Event queue spool + pending |
-| `~/.cusa/queue/state/` | State queue spool |
-| `~/.cusa/queue/commands/` | Command queue |
-| `~/.cusa/queue/command-results/` | Command result queue |
+| `{dataDir}/state.json` | Counters, bookmarks, FIM baseline, inventory snapshot, task IDs |
+| `{dataDir}/secrets.enc` | Encrypted enrollment identity |
+| `{dataDir}/config/deploy.json` | MSI-seeded manager address (when present) |
+| `{dataDir}/config.local.json` | GUI/API config overlay |
+| `{dataDir}/queue/events/` | Event queue spool + pending |
+| `{dataDir}/queue/state/` | State queue spool |
+| `{dataDir}/queue/commands/` | Command queue |
+| `{dataDir}/queue/command-results/` | Command result queue |
+| `{dataDir}/logs/agent/` | Rotating agent logs (MSI install) |
 
 Repo config (not overwritten by GUI):
 
@@ -729,6 +773,13 @@ Repo config (not overwritten by GUI):
 |------|----------|
 | `agent/config/default.json` | Built-in defaults |
 | `agent/config/config.local.json` | Deploy-time override (gitignored in production) |
+
+Program Files (MSI):
+
+| Path | Contents |
+|------|----------|
+| `C:\Program Files\CUSA\agent\` | `cusa-agent.exe`, service host |
+| `C:\Program Files\CUSA\gui\CUSA.exe` | Desktop GUI (full MSI only) |
 
 ---
 
@@ -765,7 +816,22 @@ Test files in `agent/tests/`:
 | Port in use | Another process on 8710 — stop it or change `api.port` |
 | Config JSON | Validate `config.local.json` syntax |
 
-### GUI shows "Agent offline"
+### GUI shows "Agent unreachable" / Failed to fetch (MSI)
+
+| Check | Action |
+|-------|--------|
+| Service running | `sc query CUSAAgent` — state should be RUNNING |
+| API reachable | `curl http://127.0.0.1:8710/api/status` — if this works, issue is GUI ↔ API (CORS); rebuild MSI with latest agent |
+| Service stopped | Check `C:\ProgramData\CUSA\logs\agent\service-host.log` and `cusa-*.log` |
+| Agent-only dev workaround | `npm run gui:dev` at http://localhost:1420 while service runs |
+
+The packaged Tauri app loads from `http://tauri.localhost`; the local API must allow that origin (fixed in current source).
+
+### Config shows null manager address
+
+Expected on fresh install — `default.json` ships with null manager/enrollment fields. Once the GUI connects, open **Configuration** and set manager address and enrollment password, then save.
+
+### GUI shows "Agent offline" (web dev)
 
 | Check | Action |
 |-------|--------|
@@ -797,6 +863,22 @@ The field is in the `locked` array. Remove from `locked` in deploy config or cha
 
 Agent auto-reconnects with exponential backoff. Check manager `remoted` logs and network stability on port 1514.
 
+### No GUI after MSI install
+
+| Check | Action |
+|-------|--------|
+| Agent-only MSI | Rebuild with `npm run build:release` (no `SKIP_GUI=1`) |
+| Missing exe | `Test-Path "C:\Program Files\CUSA\gui\CUSA.exe"` |
+| Service only needed | Use web GUI at `http://localhost:1420` in dev, or API on `:8710` |
+
+### Wrong manager address (MSI)
+
+Check `C:\ProgramData\CUSA\config\deploy.json` — it overrides repo `config.local.json`. Update via GUI **Configuration** or edit `config.local.json` under ProgramData.
+
+### Enrollment pending (agent stays up)
+
+Enrollment failure is non-fatal; the agent retries with backoff. Fix manager reachability, password, or API credentials in **Configuration**.
+
 ---
 
 ## 13. Known limitations
@@ -806,8 +888,7 @@ Agent auto-reconnects with exponential backoff. Check manager `remoted` logs and
 | State sync | Text session markers; full Wazuh FlatBuffers binary protocol not yet implemented |
 | Windows events | PowerShell polling — not native EventChannel subscription |
 | WPK updates | SHA-256 only — signature verification not implemented |
-| Service install | No Windows service / MSI yet (Phase 10) |
-| GUI | Does not auto-start agent process in Tauri |
+| Tauri dev | Does not auto-start agent — start `npm start` in `agent/` separately |
 | HTTPS Wazuh | `5.x-https` adapter is a stub |
 
 ---
@@ -816,6 +897,9 @@ Agent auto-reconnects with exponential backoff. Check manager `remoted` logs and
 
 | Document | Topic |
 |----------|-------|
+| [BUILD.md](BUILD.md) | Windows MSI release build |
+| [windows-installation.md](windows-installation.md) | MSI install steps |
+| [enterprise-deployment.md](enterprise-deployment.md) | Silent push, SCCM |
 | [architecture.md](architecture.md) | Module boundaries, data flows, tech stack |
 | [wazuh-compatibility.md](wazuh-compatibility.md) | Full Wazuh protocol specification |
 | [wazuh-protocol-notes.md](wazuh-protocol-notes.md) | Research notes and source references |

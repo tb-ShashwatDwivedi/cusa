@@ -1,9 +1,8 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
-     xmlns:util="http://wixtoolset.org/schemas/v4/wxs/util">
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
 
   <Fragment>
-    <Component Id="ServiceComponent" Directory="AgentDir" Guid="*">
+    <Component Id="ServiceHostComponent" Directory="AgentDir" Guid="*">
       <File Id="ServiceHostExe" Source="$(var.BuildRoot)\agent\cusa-service-host.exe" KeyPath="yes" />
 
       <ServiceInstall
@@ -24,14 +23,7 @@
         Stop="both"
         Remove="uninstall"
         Wait="yes" />
-
-      <util:ServiceConfig
-        Name="CUSAAgent"
-        FirstFailureActionType="restart"
-        SecondFailureActionType="restart"
-        ThirdFailureActionType="restart"
-        ResetPeriodInDays="1"
-        RestartServiceDelayInSeconds="5" />
     </Component>
   </Fragment>
+
 </Wix>

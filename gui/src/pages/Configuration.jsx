@@ -6,9 +6,12 @@ import {
   ErrorBanner,
   PageHeader,
 } from '../components/ui.jsx';
+import { EnrollmentStatus } from '../components/enrollment.jsx';
 
 const FIELDS = [
   { path: 'wazuh.manager.address', label: 'Manager address', type: 'text' },
+  { path: 'wazuh.manager.port', label: 'Manager port', type: 'number' },
+  { path: 'wazuh.manager.enrollmentPort', label: 'Enrollment port (authd)', type: 'number' },
   { path: 'wazuh.version', label: 'Wazuh protocol version', type: 'text' },
   { path: 'collectors.eventChannel.enabled', label: 'Windows event channel', type: 'boolean' },
   { path: 'collectors.sysmon.enabled', label: 'Sysmon collector', type: 'boolean' },
@@ -45,6 +48,7 @@ function isLocked(path, locked) {
 }
 
 function toDisplay(path, value, type) {
+  if (type === 'secret') return '';
   if (type === 'paths') return Array.isArray(value) ? value.join(', ') : '';
   if (type === 'boolean') return value === true;
   return value ?? '';
@@ -65,6 +69,7 @@ function fromInput(path, raw, type) {
 export default function Configuration() {
   const fetchConfig = useCallback(() => api.config(), []);
   const { data, error, loading } = usePoll(fetchConfig, 10000);
+  const { data: status } = usePoll(() => api.status(), 5000);
   const [draft, setDraft] = useState({});
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState(null);
@@ -95,6 +100,7 @@ export default function Configuration() {
       let patch = {};
       for (const field of FIELDS) {
         if (isLocked(field.path, locked)) continue;
+        if (field.type === 'secret' && !draft[field.path]) continue;
         const next = fromInput(field.path, draft[field.path], field.type);
         const prev = getByPath(cfg, field.path);
         const same = field.type === 'paths'
@@ -123,7 +129,7 @@ export default function Configuration() {
     <>
       <PageHeader
         title="Configuration"
-        description="Edit local agent settings. Locked fields are managed by CyberSIO policy."
+        description="Edit manager address and collector settings. Enrollment uses the built-in CyberSIO credentials. Changing the manager re-registers the agent."
         actions={
           <button type="button" className="btn-primary" onClick={onSave} disabled={saving || loading}>
             {saving ? 'Saving…' : 'Save changes'}
@@ -136,54 +142,81 @@ export default function Configuration() {
         <div className="success-banner" role="status">Configuration saved and applied.</div>
       )}
 
+      <EnrollmentStatus
+        status={status?.enrollment}
+        agentId={status?.agentId}
+        manager={status?.manager}
+        connected={status?.transportConnected}
+        configured={status?.enrollmentConfigured}
+      />
+
       {loading && !data ? (
         <div className="empty-state">
           <p className="empty-title">Loading configuration…</p>
         </div>
       ) : (
         <div className="config-form">
-          {FIELDS.map((field) => {
-            const fieldLocked = isLocked(field.path, locked);
-            const id = `cfg-${field.path}`;
-            return (
-              <label key={field.path} className={`config-field${fieldLocked ? ' config-field--locked' : ''}`}>
-                <span className="config-label">
-                  {field.label}
-                  {fieldLocked && <Badge tone="locked">Locked</Badge>}
-                </span>
-                {field.type === 'boolean' ? (
-                  <input
-                    id={id}
-                    type="checkbox"
-                    checked={!!draft[field.path]}
-                    disabled={fieldLocked}
-                    onChange={(e) => onChange(field.path, e.target.checked)}
-                  />
-                ) : field.type === 'select' ? (
-                  <select
-                    id={id}
-                    value={draft[field.path] || ''}
-                    disabled={fieldLocked}
-                    onChange={(e) => onChange(field.path, e.target.value)}
-                  >
-                    {field.options.map((o) => (
-                      <option key={o} value={o}>{o}</option>
-                    ))}
-                  </select>
-                ) : (
-                  <input
-                    id={id}
-                    type={field.type === 'number' ? 'number' : 'text'}
-                    className="mono"
-                    value={draft[field.path] ?? ''}
-                    disabled={fieldLocked}
-                    onChange={(e) => onChange(field.path, e.target.value)}
-                  />
-                )}
-                <span className="config-path mono">{field.path}</span>
-              </label>
-            );
-          })}
+          {FIELDS.reduce((sections, field) => {
+            const section = field.section || 'General';
+            if (!sections.find((s) => s.title === section)) {
+              sections.push({ title: section, fields: [] });
+            }
+            sections.find((s) => s.title === section).fields.push(field);
+            return sections;
+          }, []).map((section) => (
+            <div key={section.title} className="config-section">
+              {section.title !== 'General' && (
+                <h3 className="config-section-title">{section.title}</h3>
+              )}
+              {section.fields.map((field) => {
+                const fieldLocked = isLocked(field.path, locked);
+                const id = `cfg-${field.path}`;
+                const inputType = field.type === 'number'
+                  ? 'number'
+                  : field.type === 'secret'
+                    ? 'password'
+                    : 'text';
+                return (
+                  <label key={field.path} className={`config-field${fieldLocked ? ' config-field--locked' : ''}`}>
+                    <span className="config-label">
+                      {field.label}
+                      {fieldLocked && <Badge tone="locked">Locked</Badge>}
+                    </span>
+                    {field.type === 'boolean' ? (
+                      <input
+                        id={id}
+                        type="checkbox"
+                        checked={!!draft[field.path]}
+                        disabled={fieldLocked}
+                        onChange={(e) => onChange(field.path, e.target.checked)}
+                      />
+                    ) : field.type === 'select' ? (
+                      <select
+                        id={id}
+                        value={draft[field.path] || ''}
+                        disabled={fieldLocked}
+                        onChange={(e) => onChange(field.path, e.target.value)}
+                      >
+                        {field.options.map((o) => (
+                          <option key={o} value={o}>{o}</option>
+                        ))}
+                      </select>
+                    ) : (
+                      <input
+                        id={id}
+                        type={inputType}
+                        className="mono"
+                        value={draft[field.path] ?? ''}
+                        disabled={fieldLocked}
+                        onChange={(e) => onChange(field.path, e.target.value)}
+                      />
+                    )}
+                    <span className="config-path mono">{field.path}</span>
+                  </label>
+                );
+              })}
+            </div>
+          ))}
         </div>
       )}
     </>

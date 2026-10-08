@@ -1,6 +1,6 @@
 # CUSA Windows Installer Architecture
 
-**Status:** Design (Phase 10)  
+**Status:** Implemented (Phase 10a–10c) — see checklist §12  
 **Version:** 1.0  
 **Date:** 2026-10-06  
 **Audience:** Release engineering, endpoint security, Windows platform
@@ -11,7 +11,7 @@ This document is the installation architecture source of truth for CUSA (CyberSI
 
 ## 1. Executive summary
 
-CUSA today is a **developer-run Node.js agent** with a **Tauri-wrapped React GUI**. There is **no Windows service, no packaged executable, and no MSI**. Runtime data defaults to `~/.cusa` under the interactive user profile. Phase 10 delivers:
+CUSA ships as a **WiX MSI** with a **Windows service** (`CUSAAgent`), **Tauri GUI** (`CUSA.exe`), and **ProgramData** runtime layout. Dev mode still uses `npm start` + `~/.cusa`. Production endpoints use:
 
 1. Machine-wide install under `C:\Program Files\CUSA\`
 2. Machine-wide runtime data under `C:\ProgramData\CUSA\`
@@ -482,10 +482,12 @@ Registry flag `HKLM\Software\CyberSIO\CUSA\PurgeOnUninstall` — optional enterp
 | `MANAGER_PORT` | `1514` | Event port |
 | `ENROLLMENT_PORT` | `1515` | Enrollment port |
 | `START_SERVICE` | `1` | Start service after install |
-| `LAUNCH_GUI` | `1` (UI), `0` (/qn) | Launch `CUSA.exe` on success |
-| `DESKTOP_SHORTCUT` | `0` | Create desktop shortcut |
+| `LAUNCH_GUI` | `1` | Launch `CUSA.exe` on success (when GUI in MSI) |
 | `PURGE_DATA` | `0` | Decommission purge on uninstall |
-| `AGENT_ONLY` | `0` | Omit GUI feature |
+
+**Build-time (not `msiexec` properties):** `IncludeGui` — set via `build/gui/CUSA.exe` presence or `AGENT_ONLY=1` / `SKIP_GUI=1` at release build. When `IncludeGui=1`, Start Menu and Desktop shortcuts are always created.
+
+**Removed / not used:** `DESKTOP_SHORTCUT`, `AGENT_ONLY` as install properties. WiX **Util extension** is not required.
 
 **Never** document `ENROLLMENT_PASSWORD` in command-line examples. Unattended enrollment uses GUI post-install or GPO-deployed config file in ProgramData (deployed separately).
 
@@ -754,41 +756,41 @@ Clean VM
 
 ## 12. Implementation phases
 
-### Phase 10a — Foundation (this sprint)
+### Phase 10a — Foundation ✅
 
-- [ ] `docs/windows-installer-architecture.md` (this document)
-- [ ] `agent/src/platform/paths.js` + Windows data dir
-- [ ] Secrets path `secrets/secrets.enc` + DPAPI key
-- [ ] Graceful queue drain on shutdown
-- [ ] File logging to `logs/agent/`
-- [ ] Loopback + API token auth
-- [ ] `service-host/` Rust crate
-- [ ] SEA build in `build-agent.js`
-- [ ] `build/gui` + rename `CUSA.exe`
+- [x] `docs/windows-installer-architecture.md` (this document)
+- [x] `agent/src/platform/paths.js` + Windows data dir
+- [x] Secrets path `secrets/secrets.enc` + DPAPI key
+- [x] Graceful queue drain on shutdown
+- [x] File logging to `logs/agent/`
+- [x] Loopback + API token auth
+- [x] `service-host/` Rust crate
+- [x] SEA build in `build-agent.js`
+- [x] `build/gui` + rename `CUSA.exe` (`npm run build:gui`)
 
-### Phase 10b — MSI core
+### Phase 10b — MSI core ✅
 
-- [ ] WiX 4 project skeleton
-- [ ] Service install + recovery + permissions
-- [ ] ProgramData folder CA
-- [ ] Shortcuts + UI
-- [ ] MajorUpgrade + preserve ProgramData
-- [ ] Silent install properties
+- [x] WiX 4 project skeleton
+- [x] Service install + recovery + permissions
+- [x] ProgramData folder CA
+- [x] Shortcuts (Start Menu + Desktop when `IncludeGui=1`) + launch CA
+- [x] MajorUpgrade + preserve ProgramData
+- [x] Silent install properties
 
-### Phase 10c — Migration + polish
+### Phase 10c — Migration + polish ✅
 
-- [ ] Config `schemaVersion` migrations
-- [ ] `~/.cusa` → ProgramData migration
-- [ ] GUI first-run / service status UX
-- [ ] `validate-msi.js`
-- [ ] Documentation set (`windows-installation.md`, etc.)
-- [ ] VM lifecycle test
+- [x] Config `schemaVersion` migrations
+- [x] `~/.cusa` → ProgramData migration
+- [x] GUI service status UX (service vs manager pills)
+- [x] `validate-msi.js`
+- [x] Documentation set — see `docs/BUILD.md`
+- [ ] VM lifecycle test (manual on clean VM)
 
 ### Phase 10d — Enterprise hardening (follow-on)
 
 - [ ] Dedicated service account + SDDL for Security log
 - [ ] Full `cusa-updater.exe` with signature verification
-- [ ] AGENT_ONLY MSI feature
+- [x] Agent-only MSI (`SKIP_GUI=1` / `AGENT_ONLY=1` → `IncludeGui=0`)
 - [ ] System tray (Exit GUI does not stop service)
 
 ---

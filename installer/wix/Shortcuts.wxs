@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+
+  <Fragment>
+    <?if $(var.IncludeGui) = 1 ?>
+    <Component Id="GuiShortcut" Directory="CusaProgramMenuDir" Guid="*">
+      <Shortcut
+        Id="CusaGuiShortcut"
+        Name="CUSA Agent"
+        Description="CUSA endpoint security console"
+        Target="[GuiDir]CUSA.exe"
+        WorkingDirectory="GuiDir" />
+      <RemoveFolder Id="RemoveCusaMenu" Directory="CusaProgramMenuDir" On="uninstall" />
+      <RegistryValue Root="HKCU" Key="Software\CyberSIO\CUSA" Name="installed" Type="integer" Value="1" KeyPath="yes" />
+    </Component>
+
+    <StandardDirectory Id="DesktopFolder">
+      <Component Id="GuiDesktopShortcut" Guid="*">
+        <Shortcut
+          Id="CusaGuiDesktopShortcut"
+          Name="CUSA Agent"
+          Description="CUSA endpoint security console"
+          Target="[GuiDir]CUSA.exe"
+          WorkingDirectory="GuiDir" />
+        <RegistryValue Root="HKCU" Key="Software\CyberSIO\CUSA" Name="desktop_shortcut" Type="integer" Value="1" KeyPath="yes" />
+      </Component>
+    </StandardDirectory>
+    <?endif?>
+
+    <Component Id="UninstallShortcut" Directory="CusaProgramMenuDir" Guid="*">
+      <Shortcut
+        Id="CusaUninstallShortcut"
+        Name="Uninstall CUSA"
+        Target="[SystemFolder]msiexec.exe"
+        Arguments="/x [ProductCode]" />
+      <RegistryValue Root="HKCU" Key="Software\CyberSIO\CUSA" Name="uninstall_shortcut" Type="integer" Value="1" KeyPath="yes" />
+    </Component>
+  </Fragment>
+
+</Wix>

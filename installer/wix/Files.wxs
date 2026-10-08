@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+
+  <Fragment>
+    <ComponentGroup Id="CUSAFiles" Directory="INSTALLDIR">
+
+      <Component Id="AgentExe" Directory="AgentDir" Guid="*">
+        <File Id="CusaAgentExe" Source="$(var.BuildRoot)\agent\cusa-agent.exe" KeyPath="yes" />
+      </Component>
+
+      <Component Id="AgentConfig" Directory="AgentConfigDir" Guid="*">
+        <File Id="AgentDefaultConfig" Source="$(var.BuildRoot)\agent\config\default.json" KeyPath="yes" />
+      </Component>
+
+      <?if $(var.IncludeGui) = 1 ?>
+      <Component Id="GuiExe" Directory="GuiDir" Guid="*">
+        <File Id="CusaGuiExe" Source="$(var.BuildRoot)\gui\CUSA.exe" KeyPath="yes" />
+      </Component>
+      <?endif?>
+
+      <Component Id="UpdaterExe" Directory="UpdaterDir" Guid="*">
+        <File Id="CusaUpdaterExe" Source="$(var.BuildRoot)\updater\cusa-updater.exe" KeyPath="yes" />
+      </Component>
+
+      <Component Id="VersionJson" Directory="INSTALLDIR" Guid="*">
+        <File Id="CusaVersionJson" Source="$(var.BuildRoot)\version.json" KeyPath="yes" />
+      </Component>
+
+      <Component Id="ScriptInit" Directory="InstallerScriptsDir" Guid="*">
+        <File Id="ScriptInitPd" Source="$(var.BuildRoot)\installer\scripts\init-programdata.ps1" KeyPath="yes" />
+      </Component>
+      <Component Id="ScriptDeploy" Directory="InstallerScriptsDir" Guid="*">
+        <File Id="ScriptDeploy" Source="$(var.BuildRoot)\installer\scripts\write-deploy-config.ps1" />
+      </Component>
+      <Component Id="ScriptPurge" Directory="InstallerScriptsDir" Guid="*">
+        <File Id="ScriptPurge" Source="$(var.BuildRoot)\installer\scripts\purge-programdata.ps1" />
+      </Component>
+
+    </ComponentGroup>
+  </Fragment>
+
+</Wix>

@@ -11,9 +11,14 @@
     "gui:build": "npm run build --prefix gui",
     "tauri:dev": "cd src-tauri && cargo tauri dev",
     "tauri:build": "cd src-tauri && cargo tauri build",
-    "build": "node scripts/build-agent.js",
+    "build": "node scripts/release.js",
     "build:agent": "node scripts/build-agent.js",
+    "build:service": "node scripts/build-service-host.js",
+    "build:gui": "node scripts/build-gui.js",
+    "build:msi": "node scripts/build-msi.js",
+    "build:release": "node scripts/release.js",
     "verify:agent": "node scripts/verify-agent.js",
+    "verify:release": "node scripts/validate-msi.js",
     "test": "npm run agent:test"
   },
   "devDependencies": {

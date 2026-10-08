@@ -26,6 +26,11 @@ import {
   getPaths,
 } from '../config/loader.js';
 import { purgeAgentData } from '../platform/decommission.js';
+import { controlService, queryServiceState } from '../platform/service-control.js';
+import { initSecretsEncryption } from '../security/secrets.js';
+import { ensureApiToken } from '../security/api-token.js';
+import { clearIdentity } from '../wazuh/v4/enrollment.js';
+import { shutdownFileLogging } from '../logging/logger.js';
 
 export const AGENT_VERSION = '1.0.0';
 
@@ -73,11 +78,14 @@ export class Agent {
       },
     });
     this.api = null;
+    this.apiToken = null;
     this.running = false;
     this.lastComplianceResults = [];
   }
 
   async start() {
+    await initSecretsEncryption(this.paths.cache);
+    this.apiToken = await ensureApiToken(this.paths.cache);
     await this.state.load();
     await this.queue.init();
     await this.wazuh.init();
@@ -230,7 +238,23 @@ export class Agent {
   }
 
   async reloadConfig() {
+    const prevManager = this.config.wazuh?.manager;
     const config = await loadConfig(process.env.CUSA_CONFIG || undefined);
+    const nextManager = config.wazuh?.manager;
+    const managerChanged =
+      prevManager?.address !== nextManager?.address
+      || prevManager?.port !== nextManager?.port
+      || prevManager?.enrollmentPort !== nextManager?.enrollmentPort;
+    if (managerChanged) {
+      await clearIdentity(this.paths.secrets);
+      if (this.wazuh.adapter) this.wazuh.adapter.identity = null;
+      this.state.data.enrollment = { status: 'pending', agentId: null, name: null };
+      await this.state.save();
+      eventLog.agent('Manager changed; clearing enrollment for re-enroll', {
+        from: prevManager?.address,
+        to: nextManager?.address,
+      }, 'warn');
+    }
     this.config = config;
     for (const c of this.collectors) await c.stop();
     this.collectors = createCollectors(this.config, this.state);
@@ -249,19 +273,44 @@ export class Agent {
     this.logger.info('Config reload complete');
   }
 
+  /** @param {'start'|'stop'|'restart'} action */
+  async controlService(action) {
+    eventLog.agent(`Service control requested: ${action}`, {}, 'warn');
+    const result = await controlService(action, {
+      onDevStop: async () => {
+        await this.stop();
+        shutdownFileLogging();
+        setTimeout(() => process.exit(0), 250);
+      },
+    });
+    return result;
+  }
+
+  async getServiceState() {
+    return queryServiceState();
+  }
+
   getStatus() {
     const identity = this.wazuh.adapter?.identity;
+    const enrollmentCredentials = {
+      authd: true,
+      api: true,
+    };
     return {
       agentId: identity?.id || this.state.data.enrollment?.agentId,
       hostname: this.config.agent.name,
       version: AGENT_VERSION,
+      enrollmentCredentials,
+      enrollmentConfigured: enrollmentCredentials.authd || enrollmentCredentials.api,
       enrollment: identity
         ? 'enrolled'
         : this.state.data.enrollment?.status === 'pending'
           ? 'pending'
           : this.state.data.enrollment?.status || 'pending',
+      serviceRunning: this.running,
       manager: this.config.wazuh.manager?.address,
       deploy: this.config.deploy,
+      localApiToken: this.apiToken,
       dataDir: this.config.agent.dataDir,
       logDir: this.paths.logs,
       transportConnected: this.metrics.transportConnected,
@@ -284,10 +333,11 @@ export class Agent {
   async stop() {
     this.running = false;
     this.scheduler.stopAll();
-    this.queue.stop();
     for (const c of this.collectors) await c.stop();
     this.fim?.stop();
     this.registry?.stop();
+    await this.queue.drain(this.wazuh, 15000);
+    this.queue.stop();
     await this.wazuh.close();
     await this.api?.close();
     await this.state.save();

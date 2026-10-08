@@ -1,8 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
-     xmlns:util="http://wixtoolset.org/schemas/v4/wxs/util">
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
 
-  <!-- Stable across all CUSA releases — do not change -->
   <?define UpgradeCode = "A1B2C3D4-E5F6-7890-ABCD-EF1234567890" ?>
 
   <Package
@@ -11,7 +9,6 @@
     Version="1.0.0.0"
     UpgradeCode="$(var.UpgradeCode)"
     Scope="perMachine"
-    InstallerVersion="500"
     Compressed="yes">
 
     <MajorUpgrade
@@ -20,25 +17,31 @@
 
     <Media Id="1" Cabinet="cusa.cab" EmbedCab="yes" />
 
-    <!-- Enterprise / centralized push properties -->
     <Property Id="MANAGER_ADDRESS" Secure="yes" />
     <Property Id="MANAGER_PORT" Value="1514" />
     <Property Id="ENROLLMENT_PORT" Value="1515" />
     <Property Id="START_SERVICE" Value="1" />
     <Property Id="LAUNCH_GUI" Value="1" />
-    <Property Id="DESKTOP_SHORTCUT" Value="0" />
     <Property Id="PURGE_DATA" Value="0" />
-    <Property Id="AGENT_ONLY" Value="0" />
 
     <Feature Id="Complete" Title="CUSA Agent" Level="1">
       <ComponentGroupRef Id="CUSAFiles" />
-      <ComponentRef Id="ServiceComponent" />
+      <ComponentRef Id="ServiceHostComponent" />
+      <?if $(var.IncludeGui) = 1 ?>
+      <ComponentRef Id="GuiShortcut" />
+      <ComponentRef Id="GuiDesktopShortcut" />
+      <?endif?>
+      <ComponentRef Id="UninstallShortcut" />
     </Feature>
 
     <InstallExecuteSequence>
       <Custom Action="CA_WriteDeployConfig" After="InstallFiles" Condition="NOT REMOVE" />
       <Custom Action="CA_CreateProgramData" After="CA_WriteDeployConfig" Condition="NOT REMOVE" />
       <Custom Action="CA_PurgeProgramData" Before="RemoveFiles" Condition='REMOVE="ALL" AND PURGE_DATA="1"' />
+      <?if $(var.IncludeGui) = 1 ?>
+      <Custom Action="CA_LaunchGui" After="InstallFinalize" Condition='NOT REMOVE AND LAUNCH_GUI="1"' />
+      <?endif?>
     </InstallExecuteSequence>
   </Package>
+
 </Wix>

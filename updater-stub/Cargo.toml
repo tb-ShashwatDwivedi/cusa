@@ -1,0 +1,8 @@
+[package]
+name = "cusa-updater-stub"
+version = "1.0.0"
+edition = "2021"
+
+[[bin]]
+name = "cusa-updater"
+path = "src/main.rs"

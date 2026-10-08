@@ -12,7 +12,11 @@
       "protocol": "tcp"
     },
     "enrollment": {
-      "password": null,
+      "password": "wazuh-wui",
+      "apiUser": "wazuh-wui",
+      "apiPassword": "wazuh-wui",
+      "apiPort": 55000,
+      "insecure": true,
       "groups": ["default"],
       "caCert": null
     }

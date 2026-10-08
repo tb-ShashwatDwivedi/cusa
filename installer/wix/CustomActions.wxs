@@ -2,11 +2,10 @@
 <Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
 
   <Fragment>
-    <!-- Writes config/deploy.json from MSI properties (centralized push). No secrets. -->
     <CustomAction
       Id="CA_WriteDeployConfig"
       Directory="SystemFolder"
-      ExeCommand="powershell.exe -NoProfile -ExecutionPolicy Bypass -File &quot;[AgentDir]scripts\write-deploy-config.ps1&quot; -DataDir &quot;[CommonAppDataFolder]CUSA&quot; -Address &quot;[MANAGER_ADDRESS]&quot; -Port [MANAGER_PORT] -EnrollmentPort [ENROLLMENT_PORT]"
+      ExeCommand="powershell.exe -NoProfile -ExecutionPolicy Bypass -File &quot;[InstallerScriptsDir]write-deploy-config.ps1&quot; -DataDir &quot;[CommonAppDataFolder]CUSA&quot; -Address &quot;[MANAGER_ADDRESS]&quot; -Port [MANAGER_PORT] -EnrollmentPort [ENROLLMENT_PORT]"
       Execute="deferred"
       Impersonate="no"
       Return="check" />
@@ -14,18 +13,28 @@
     <CustomAction
       Id="CA_CreateProgramData"
       Directory="SystemFolder"
-      ExeCommand="powershell.exe -NoProfile -ExecutionPolicy Bypass -File &quot;[AgentDir]scripts\init-programdata.ps1&quot; -DataDir &quot;[CommonAppDataFolder]CUSA&quot;"
+      ExeCommand="powershell.exe -NoProfile -ExecutionPolicy Bypass -File &quot;[InstallerScriptsDir]init-programdata.ps1&quot; -DataDir &quot;[CommonAppDataFolder]CUSA&quot;"
       Execute="deferred"
       Impersonate="no"
       Return="check" />
 
-    <!-- Decommission purge on uninstall when PURGE_DATA=1 -->
     <CustomAction
       Id="CA_PurgeProgramData"
       Directory="SystemFolder"
-      ExeCommand="powershell.exe -NoProfile -ExecutionPolicy Bypass -File &quot;[AgentDir]scripts\purge-programdata.ps1&quot; -DataDir &quot;[CommonAppDataFolder]CUSA&quot;"
+      ExeCommand="powershell.exe -NoProfile -ExecutionPolicy Bypass -File &quot;[InstallerScriptsDir]purge-programdata.ps1&quot; -DataDir &quot;[CommonAppDataFolder]CUSA&quot;"
       Execute="deferred"
       Impersonate="no"
       Return="check" />
+
+    <?if $(var.IncludeGui) = 1 ?>
+    <CustomAction
+      Id="CA_LaunchGui"
+      Directory="SystemFolder"
+      ExeCommand="powershell.exe -NoProfile -WindowStyle Hidden -Command &quot;Start-Process -FilePath '[GuiDir]CUSA.exe'&quot;"
+      Execute="immediate"
+      Impersonate="yes"
+      Return="asyncNoWait" />
+    <?endif?>
   </Fragment>
+
 </Wix>

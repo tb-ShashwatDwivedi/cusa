@@ -1,4 +1,15 @@
 const BASE = import.meta.env.VITE_AGENT_API || 'http://127.0.0.1:8710';
+let apiToken = null;
+
+export function setApiToken(token) {
+  apiToken = token || null;
+}
+
+function authHeaders() {
+  const h = { 'Content-Type': 'application/json' };
+  if (apiToken) h.Authorization = `Bearer ${apiToken}`;
+  return h;
+}
 
 async function get(path) {
   const res = await fetch(`${BASE}${path}`);
@@ -9,7 +20,7 @@ async function get(path) {
 async function patch(path, body) {
   const res = await fetch(`${BASE}${path}`, {
     method: 'PATCH',
-    headers: { 'Content-Type': 'application/json' },
+    headers: authHeaders(),
     body: JSON.stringify(body),
   });
   if (!res.ok) {
@@ -22,7 +33,7 @@ async function patch(path, body) {
 async function post(path, body) {
   const res = await fetch(`${BASE}${path}`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: authHeaders(),
     body: JSON.stringify(body),
   });
   if (!res.ok) {
@@ -38,7 +49,7 @@ export const api = {
   metrics: () => get('/api/metrics'),
   collectors: () => get('/api/collectors'),
   config: () => get('/api/config'),
-  patchConfig: (patch) => patch('/api/config', { patch }),
+  patchConfig: (configPatch) => patch('/api/config', { patch: configPatch }),
   queue: () => get('/api/queue'),
   diagnostics: () => get('/api/diagnostics'),
   logs: ({ category, limit, since, search } = {}) => {
@@ -54,5 +65,7 @@ export const api = {
   fim: () => get('/api/fim'),
   compliance: () => get('/api/compliance'),
   deploy: () => get('/api/deploy'),
+  service: () => get('/api/service'),
+  serviceControl: (action) => post(`/api/service/${action}`, {}),
   decommission: (body) => post('/api/decommission/purge', body),
 };

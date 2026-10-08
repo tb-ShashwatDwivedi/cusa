@@ -1,8 +1,12 @@
 import Fastify from 'fastify';
 import { eventLog } from '../logging/event-log.js';
+import { hasValidToken } from '../security/api-token.js';
+import { redactEnrollment } from '../wazuh/enrollment-defaults.js';
 
 // GUI dev (Vite/Tauri) runs on a different origin than the local API.
-const LOCAL_ORIGIN = /^(https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?|tauri:\/\/localhost)$/;
+// Tauri 2 production uses http(s)://tauri.localhost (and *.localhost on Windows).
+const LOCAL_ORIGIN =
+  /^(https?:\/\/([\w-]+\.)*(localhost|127\.0\.0\.1)(:\d+)?|tauri:\/\/localhost)$/;
 const LOOPBACK = /^(127\.\d+\.\d+\.\d+|::1|::ffff:127\.\d+\.\d+\.\d+)$/;
 
 /** @param {import('fastify').FastifyRequest} req */
@@ -18,8 +22,8 @@ export function allowLocalCors(app) {
     const origin = req.headers.origin;
     if (origin && LOCAL_ORIGIN.test(origin)) {
       reply.header('Access-Control-Allow-Origin', origin);
-      reply.header('Access-Control-Allow-Methods', 'GET, PATCH, OPTIONS');
-      reply.header('Access-Control-Allow-Headers', 'Content-Type');
+      reply.header('Access-Control-Allow-Methods', 'GET, PATCH, POST, OPTIONS');
+      reply.header('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Cusa-Token');
       reply.header('Vary', 'Origin');
     }
     if (req.method === 'OPTIONS') {
@@ -58,10 +62,23 @@ export async function createApiServer(agent) {
     return out;
   });
   app.get('/api/config', async () => ({
-    effective: agent.config,
+    effective: {
+      ...agent.config,
+      wazuh: {
+        ...agent.config.wazuh,
+        enrollment: redactEnrollment(agent.config.wazuh?.enrollment),
+      },
+    },
     locked: agent.config.locked || [],
   }));
+  function requireToken(req, reply) {
+    if (!agent.apiToken || hasValidToken(req, agent.apiToken)) return true;
+    reply.code(401).send({ error: 'Invalid or missing API token' });
+    return false;
+  }
+
   app.patch('/api/config', async (req, reply) => {
+    if (!requireToken(req, reply)) return;
     const patch = req.body?.patch;
     if (!patch || typeof patch !== 'object' || Array.isArray(patch)) {
       return reply.code(400).send({ error: 'body.patch object required' });
@@ -113,7 +130,26 @@ export async function createApiServer(agent) {
     pid: process.pid,
   }));
 
+  app.get('/api/service', async () => ({
+    ...(await agent.getServiceState()),
+    processRunning: agent.running,
+  }));
+
+  app.post('/api/service/:action', async (req, reply) => {
+    if (!requireToken(req, reply)) return;
+    const action = req.params.action;
+    if (!['start', 'stop', 'restart'].includes(action)) {
+      return reply.code(400).send({ error: 'action must be start, stop, or restart' });
+    }
+    try {
+      return await agent.controlService(action);
+    } catch (err) {
+      return reply.code(400).send({ error: err.message });
+    }
+  });
+
   app.post('/api/decommission/purge', async (req, reply) => {
+    if (!requireToken(req, reply)) return;
     const body = req.body || {};
     if (body.confirm !== 'DECOMMISSION') {
       return reply.code(400).send({

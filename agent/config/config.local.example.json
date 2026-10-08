@@ -7,9 +7,9 @@
       "enrollmentPort": 1515
     },
     "enrollment": {
-      "password": "your-enrollment-password",
+      "password": "wazuh-wui",
       "apiUser": "wazuh-wui",
-      "apiPassword": "your-api-password",
+      "apiPassword": "wazuh-wui",
       "apiPort": 55000,
       "insecure": true,
       "groups": ["default"]
