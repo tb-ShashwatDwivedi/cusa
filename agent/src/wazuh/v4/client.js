@@ -9,6 +9,8 @@ import { parseManagerCommand, formatCommandAck } from './commands.js';
 import { padAgentId } from './crypto.js';
 import { FIXED_ENROLLMENT } from '../enrollment-defaults.js';
 import { eventLog } from '../../logging/event-log.js';
+import { formatKeepalive, getWindowsOsLabel, md5EmptyConfig } from './keepalive.js';
+import { truncatePlaintext } from './message-limit.js';
 
 export class WazuhAdapter {
   /** @param {object} options */
@@ -26,6 +28,8 @@ export class WazuhAdapter {
     this.enrollShouldRun = false;
     this.enrollDelayMs = 5000;
     this.keepaliveTimer = null;
+    this.osLabel = null;
+    this.mergedMd5 = null;
     this.profile = getProtocolProfile(
       options.version || '4.x',
       options.enrollment,
@@ -35,7 +39,12 @@ export class WazuhAdapter {
   sendPlaintext(plaintext) {
     if (!this.encKey) throw new Error('Not enrolled');
     const counters = this.state.nextCounters();
-    const payload = encryptMessage(plaintext, counters, this.encKey, this.identity?.id);
+    const payload = encryptMessage(
+      truncatePlaintext(plaintext),
+      counters,
+      this.encKey,
+      this.identity?.id,
+    );
     const sent = this.transport?.send(payload);
     if (sent) {
       this.metrics?.inc('stateSent');
@@ -91,7 +100,7 @@ export class WazuhAdapter {
       this.logger?.info('Connected to Wazuh manager');
       this.metrics && (this.metrics.transportConnected = true);
       this.health?.setTransport('connected');
-      this.sendHandshake();
+      this.sendHandshake().catch((err) => this.logger?.warn({ err }, 'Handshake failed'));
     });
     this.transport.on('disconnect', () => {
       this.stopKeepalive();
@@ -137,7 +146,7 @@ export class WazuhAdapter {
     setTimeout(tick, this.enrollDelayMs);
   }
 
-  sendHandshake() {
+  async sendHandshake() {
     if (!this.encKey || !this.identity) return;
     try {
       this.sendPlaintext('#!-agent startup {"version":"v4.11.2"}');
@@ -145,18 +154,36 @@ export class WazuhAdapter {
       this.logger?.warn({ err }, 'Failed to send agent startup');
       return;
     }
+    if (!this.osLabel) {
+      try {
+        this.osLabel = await getWindowsOsLabel();
+      } catch {
+        this.osLabel = 'Microsoft Windows [Ver: 10.0.0.0]';
+      }
+    }
+    this.sendKeepaliveNow();
     this.startKeepalive();
+  }
+
+  sendKeepaliveNow() {
+    if (!this.encKey || !this.identity) return;
+    const version = (this.profile.enrollVersion || 'Wazuh v4.11.2').replace(/^Wazuh\s+/i, '');
+    const text = formatKeepalive({
+      osLabel: this.osLabel || 'Microsoft Windows [Ver: 10.0.0.0]',
+      agentVersion: version.startsWith('v') ? version : `v${version}`,
+      configMd5: md5EmptyConfig(this.profile.enrollVersion),
+      mergedMd5: this.mergedMd5,
+    });
+    try {
+      this.sendPlaintext(text);
+    } catch (err) {
+      this.logger?.warn({ err }, 'Failed to send keepalive');
+    }
   }
 
   startKeepalive() {
     this.stopKeepalive();
-    this.keepaliveTimer = setInterval(() => {
-      try {
-        this.sendPlaintext('#!-agent keepalive\n');
-      } catch {
-        // reconnect path will handshake again
-      }
-    }, 10000);
+    this.keepaliveTimer = setInterval(() => this.sendKeepaliveNow(), 10000);
     this.keepaliveTimer.unref?.();
   }
 
@@ -181,6 +208,7 @@ export class WazuhAdapter {
           user: enrollment.apiUser,
           password: enrollment.apiPassword,
           insecure: enrollment.insecure !== false,
+          groups: (enrollment.groups || ['default']).join(','),
         });
         eventLog.agent('Enrolled via Wazuh API', { agentId: this.identity.id, name: this.identity.name });
         this.logger?.info('Enrolled via Wazuh API');
@@ -219,7 +247,7 @@ export class WazuhAdapter {
   async sendEvents(events) {
     if (!this.encKey) throw new Error('Not enrolled');
     for (const event of events) {
-      const plaintext = serializeEvent(event);
+      const plaintext = truncatePlaintext(serializeEvent(event));
       const counters = this.state.nextCounters();
       const payload = encryptMessage(plaintext, counters, this.encKey, this.identity?.id);
       const sent = this.transport?.send(payload);

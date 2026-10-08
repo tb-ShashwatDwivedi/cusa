@@ -2,366 +2,472 @@
 
 **CyberSIO Unified Security Agent** — lightweight endpoint security agent for CyberSIO/tbSIEM with Wazuh Manager compatibility.
 
+**Product version:** 1.0.0 (agent `AGENT_VERSION`, root `package.json`, MSI).
+
 ---
 
-## Design Principle
+## Design principle
 
 Separate concerns. Collectors never know Wazuh wire format.
 
 ```
 Collectors
     ↓
-CUSA internal event/state models
+CUSA internal event/state models (pipeline + JSON Schema)
     ↓
-Wazuh compatibility serializer/adapter  (agent/src/wazuh/)
+Wazuh compatibility adapter (agent/src/wazuh/v4/)
     ↓
-Wazuh transport
+TCP :1514 (encrypted frames) + enrollment :1515 / API :55000
     ↓
-Wazuh Manager
+Wazuh Manager (tbSIEM)
+```
+
+The **Tauri GUI** is a localhost control plane only. Collection, queues, secrets, and manager transport run in the **agent process**, supervised by a **Windows service** in production.
+
+---
+
+## Deployment modes
+
+CUSA supports two primary runtimes on Windows. Linux agent code runs in **dev** (`npm start`); there is no Linux MSI or systemd package in this repo yet.
+
+### Comparison
+
+| Aspect | Development | Production (MSI) |
+|--------|-------------|------------------|
+| **Start agent** | `npm run agent` or `cd agent && npm start` | `CUSAAgent` Windows service |
+| **Agent binary** | `node agent/src/bootstrap/main.js` | `cusa-agent.exe` (Node SEA bundle) |
+| **Service wrapper** | None (foreground Node) | `cusa-service-host.exe` (Rust SCM) |
+| **GUI** | `npm run gui:dev` / `npm run tauri:dev` | `CUSA.exe` under Program Files (full MSI) |
+| **Data root** | `%USERPROFILE%\.cusa` | `C:\ProgramData\CUSA` (`.install-marker`) |
+| **Config** | `agent/config/default.json` + `config.local.json` in repo + `~/.cusa/config/` | `deploy.json` (MSI) + `config.local.json` (GUI) |
+| **Auto-start after reboot** | No | Yes (`CUSAAgent` service) |
+| **Build** | None | `npm run build:release` → `dist/CUSA-x64-1.0.0.msi` |
+
+Override data directory anytime: `CUSA_DATA_DIR`.
+
+### Development flow
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│  Developer machine                                           │
+│                                                              │
+│  Terminal 1: npm run agent  →  node bootstrap/main.js      │
+│  Terminal 2: npm run tauri:dev  →  Vite + Tauri shell        │
+│                                                              │
+│  Data: ~/.cusa/{config,state,secrets,queue,logs,...}         │
+│  API:  http://127.0.0.1:8710  (loopback + optional token)    │
+└─────────────────────────────────────────────────────────────┘
+```
+
+- Packaged path detection (`isPackagedAgent()`) is false, so **ProgramData is never used** even if an old MSI marker exists on the machine.
+- Service control from the GUI/API uses **dev mode** for stop/restart (graceful `agent.stop()` + exit); `sc.exe` is used only when the service is installed and the agent runs as `cusa-agent.exe`.
+
+### Production (MSI) flow
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│  Endpoint (Windows)                                          │
+│                                                              │
+│  ┌──────────────┐     spawns/supervises                      │
+│  │ CUSAAgent    │────▶ cusa-agent.exe                       │
+│  │ (SCM service)│     CUSA_DATA_DIR=C:\ProgramData\CUSA      │
+│  └──────────────┘                                            │
+│                                                              │
+│  ┌──────────────┐     GET/PATCH http://127.0.0.1:8710         │
+│  │ CUSA.exe     │──── (status, config, service, decommission)│
+│  │ (optional)   │                                            │
+│  └──────────────┘                                            │
+│                                                              │
+│  Program Files\CUSA\  agent\, gui\, updater\, installer\     │
+│  ProgramData\CUSA\    config\, state\, secrets\, queue\, logs\│
+└─────────────────────────────────────────────────────────────┘
+                                      │ TCP 1514 (AES payloads)
+                                      ▼
+                            ┌─────────────────┐
+                            │  Wazuh Manager  │
+                            └─────────────────┘
+```
+
+**Install:** `msiexec /i dist\CUSA-x64-1.0.0.msi` with optional `MANAGER_ADDRESS`, `MANAGER_PORT`, `ENROLLMENT_PORT`, `LAUNCH_GUI`, `PURGE_DATA` (uninstall). See [BUILD.md](BUILD.md) and [enterprise-deployment.md](enterprise-deployment.md).
+
+**Variants:** Full MSI (agent + GUI + shortcuts) vs agent-only (`SKIP_GUI=1` / `AGENT_ONLY=1` at build time).
+
+**Release pipeline (root):**
+
+```
+npm run build:agent      → test + bundle cusa-agent.exe
+npm run build:service    → cusa-service-host.exe
+build-updater.js         → cusa-updater.exe (stub)
+npm run build:gui        → CUSA.exe
+stage-release.js         → build/
+npm run build:msi        → dist/*.msi
+npm run verify:release
 ```
 
 ---
 
-## System Context
+## System context
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
 │                        Endpoint Host                         │
 │                                                              │
 │  ┌──────────┐    ┌─────────────────────────────────────┐   │
-│  │ Tauri GUI│───▶│  Agent Service (Node.js background)  │   │
-│  │ (React)  │    │                                      │   │
-│  └──────────┘    │  ┌─────────┐  ┌──────────────────┐  │   │
-│       │          │  │ Local   │  │ Core Lifecycle   │  │   │
-│       │          │  │ API     │  │ Scheduler Health │  │   │
-│       ▼          │  │ :127.0.0.1│  └──────────────────┘  │   │
-│  localhost only  │  └─────────┘                         │   │
-│                  │                                      │   │
-│                  │  Collectors → Pipeline → Queue       │   │
-│                  │                    ↓                 │   │
-│                  │              Wazuh Adapter             │   │
+│  │ Tauri GUI│───▶│  Agent (Node / cusa-agent.exe)       │   │
+│  │ (React)  │    │  bootstrap → core/agent.js             │   │
+│  └──────────┘    │                                      │   │
+│       │          │  Scheduler · Health · Metrics        │   │
+│       ▼          │  Collectors → Pipeline → Queues      │   │
+│  127.0.0.1:8710  │  FIM · Registry · Compliance         │   │
+│                  │  Wazuh v4 adapter · Active response  │   │
 │                  └──────────────────┬───────────────────┘   │
 │                                     │                        │
 └─────────────────────────────────────┼────────────────────────┘
-                                      │ TCP 1514 / HTTPS
+                                      │ Manager TCP / enroll
                                       ▼
                             ┌─────────────────┐
                             │  Wazuh Manager  │
-                            │  (tbSIEM)       │
                             └─────────────────┘
 ```
 
-The GUI is a visibility/control layer only. The agent service runs independently as a Windows service / Linux daemon.
+---
+
+## Configuration model
+
+Layers merged into **effective config** (`agent/src/config/loader.js`):
+
+| Layer | Source | Typical use |
+|-------|--------|-------------|
+| **Defaults** | `agent/config/default.json` | Built-in collector toggles, queue limits |
+| **Deploy** | `config/deploy.json` (MSI seeds manager host/ports) | Enterprise push; locked manager fields |
+| **Local** | `config/config.local.json` under data root | GUI **Configuration** page |
+| **Fixed enrollment** | `wazuh/enrollment-defaults.js` | Normalized groups/credentials shape |
+
+Flow for local/GUI changes: validate → respect `locked` keys → save overlay → `reloadConfig()` (restarts collectors, reconnects transport). Manager change clears enrollment identity for re-enroll.
+
+**Not yet implemented:** full Wazuh **agent.conf / merged.mg** pull from manager (keepalive sends placeholder `mergedMd5`).
 
 ---
 
-## Module Boundaries
+## Module boundaries
+
+### `agent/src/bootstrap/`
+
+Entry: `main.js` — load config, file logging, `Agent.start()`, SIGINT/SIGTERM shutdown.
 
 ### `agent/src/core/`
 
-Agent lifecycle orchestration.
-
 | Module | Responsibility |
-|--------|---------------|
-| `agent.js` | Top-level agent coordinator |
-| `lifecycle.js` | Startup/shutdown state machine |
-| `scheduler.js` | Periodic tasks (sync, health, collection) |
-| `health.js` | Internal health aggregation |
-| `metrics.js` | Counters, rates, resource usage |
+|--------|----------------|
+| `agent.js` | Coordinator: collectors, Wazuh, queues, FIM, registry, compliance, API, tamper, updater |
+| `scheduler.js` | Inventory, compliance, tamper intervals |
+| `health.js` | Transport, collectors, queue aggregation |
+| `metrics.js` | Counters, transport connected flag |
 
-**Lifecycle:**
+**Lifecycle (in `agent.js`):**
 
 ```
-startup
-  → load configuration
-  → load identity
-  → load state
-  → initialize storage
-  → initialize transport (Wazuh)
-  → initialize command channel
-  → start collectors
-  → start health monitoring
-  → RUNNING
+startup → secrets/API token → state → queues → wazuh.init → collectors
+       → FIM/registry (if configured) → compliance load → queue flusher
+       → tamper → scheduled tasks → local API → RUNNING
 
-shutdown
-  → stop collectors
-  → flush queue
-  → persist state
-  → close network
-  → close local API
-  → exit
+shutdown → stop collectors/FIM/registry → queue drain → wazuh close → API close → state save
 ```
 
 ### `agent/src/wazuh/`
 
-Wazuh compatibility layer. See `docs/wazuh-compatibility.md`.
-
-| Module | Responsibility |
-|--------|---------------|
-| `version.js` | Protocol version selection |
-| `client.js` | `WazuhClient` facade |
-| `v4/` | Released TCP protocol (4.x / 5.x) |
-| `v5/` | Developing HTTPS protocol |
-| `enrollment/` | Shared enrollment state machine |
-| `events/` | Event serialization |
-| `state/` | Inventory/FIM/SCA sync |
-| `commands/` | Command receive/dispatch |
-| `config/` | Manager config sync |
-| `control/` | Control plane (/control or legacy) |
-| `downloads/` | WPK / update download |
+| Area | Responsibility |
+|------|----------------|
+| `client.js` | Facade; selects v4 vs v5 adapter from config |
+| `v4/client.js` | Enrollment, TCP transport, keepalive, send events/state, commands |
+| `v4/crypto.js` | AES payload encryption |
+| `v4/enrollment.js`, `api-enrollment.js` | Authd + REST enrollment paths |
+| `v4/keepalive.js` | Periodic manager heartbeat (version, OS label) |
+| `v4/event-serializer.js` | Canonical event → Wazuh plaintext line |
+| `v4/sync-protocol.js` | Inventory/FIM/SCA state sync sessions |
+| `v4/commands.js` | Inbound command parse/ack |
+| `v4/transport.js` | TCP connect, backoff reconnect |
+| `v5/client.js` | HTTPS protocol (developing) |
 
 ### `agent/src/collectors/`
 
-Platform-specific data collection. Common contract:
+Platform collectors registered in `collectors/registry.js`:
 
-```js
-{
-  start(),
-  stop(),
-  health(),
-  configure(config),
-  // emits events via callback/emitter
-}
-```
+| Platform | Collectors |
+|----------|------------|
+| **Windows** | Event channels (Security/System/Application, …), optional Sysmon, Defender, PowerShell operational |
+| **Linux** | journald, syslog, auditd |
+| **Both** | `file-tail` for configured log paths |
 
-```
-collectors/
-├── interfaces/     # Collector contract
-├── windows/        # Event channels, Sysmon, Defender, PowerShell
-├── linux/          # journald, syslog, auditd, file logs
-└── common/         # Shared parsers, file tailer
-```
+Contract: `collectors/interfaces/collector.js` — `start`, `stop`, `health`, bookmarks via `state/store.js`.
+
+Windows events use PowerShell `Get-WinEvent` polling (`winevt-poll.js`, `winevt-format.js`) with per-channel bookmarks.
 
 ### `agent/src/pipeline/`
 
-Internal event normalization and validation.
-
-- `event.schema.js` — JSON Schema (Ajv)
-- Transformers map collector output → canonical CUSA event
+`normalize.js` + `validator.js` + `event.schema.js` (Ajv) → canonical events with host/agent metadata.
 
 ### `agent/src/queue/`
 
-Persistent outbound buffering.
-
-```
-collector → memory queue → durable queue (SQLite/spool) → transport client
-```
-
-Separate logical queues:
+`queue-manager.js` + `durable-queue.js` (JSONL spool under data root):
 
 | Queue | Contents |
 |-------|----------|
-| `events` | Stateless log/security events |
-| `state` | Inventory/FIM/SCA sync payloads |
-| `commands` | Inbound manager commands (persisted before execution) |
+| `events` | Log/security events |
+| `state` | Inventory, FIM, registry, SCA payloads |
+| `commands` | Inbound manager commands (persisted before execute) |
 | `command-results` | Outbound command responses |
 
-Features: bounded memory, backpressure, ACK tracking, retry, crash recovery.
-
-### `agent/src/transport/`
-
-Transport abstraction below Wazuh adapter.
-
-- TCP socket management (legacy)
-- TLS connection pooling (enrollment, HTTPS)
-- Reconnect with backoff
+Bounded memory, disk limits, retry/requeue, drain on shutdown.
 
 ### `agent/src/inventory/`
 
-System inventory collection and delta computation. Outputs to state sync, not event queue.
+`scanner.js` — system, packages, processes, interfaces, listening ports (Windows); `delta.js` — sync diffs to state queue.
 
 ### `agent/src/fim/` and `agent/src/registry/`
 
-File integrity monitoring. Registry monitoring isolated in `registry/` (Windows only).
+File integrity (`watcher.js` — baseline hashes in state) and Windows registry watches (`registry/watcher.js`).
 
 ### `agent/src/compliance/`
 
-SCA rule-driven compliance: policy → checks → platform impl → result.
+`engine.js` — policy-driven SCA checks; results to state queue and compliance events.
 
 ### `agent/src/active-response/`
 
-Secure allowlisted action execution. See `docs/security-model.md`.
+`allowlist.js` + `executor.js` — terminate process, block IP, approved script hash, restart/reload agent.
 
 ### `agent/src/updater/`
 
-Signed update pipeline: manifest → verify → stage → replace → health check → rollback.
+`updater.js` — download manifest, SHA-256 verify, stage to `updates/` (apply via restart; MSI is primary upgrade path).
 
 ### `agent/src/security/`
 
-Tamper detection, secret storage, certificate management.
-
-### `agent/src/api/`
-
-Localhost-only Fastify API.
-
-| Endpoint | Purpose |
-|----------|---------|
-| `GET /api/status` | Agent state summary |
-| `GET /api/health` | Health checks |
-| `GET /api/metrics` | Counters and rates |
-| `GET /api/collectors` | Collector status |
-| `GET /api/config` | Effective configuration |
-| `GET /api/queue` | Queue depth and spool |
-| `GET /api/diagnostics` | Debug information |
-
-### `agent/src/state/`
-
-Durable local state: counters, bookmarks, baselines, enrollment status, last-known-good config.
-
-### `agent/src/logging/`
-
-Pino structured logging with component tags.
+DPAPI-backed secrets, API token for mutating local API, tamper hashes on agent binary + secrets store.
 
 ### `agent/src/platform/`
 
-OS-specific helpers (service install, paths, privileges).
+`paths.js` — dev vs ProgramData resolution; `deploy.js` — MSI deploy overlay; `service-control.js` — `sc.exe` + dev stop; `decommission.js` — purge ProgramData.
+
+### `agent/src/api/`
+
+Fastify on `127.0.0.1:8710` — loopback enforcement, CORS for Tauri/Vite, token on PATCH/POST mutations.
+
+| Endpoint | Purpose |
+|----------|---------|
+| `GET /api/status` | Agent summary, enrollment, metrics |
+| `GET /api/health`, `/api/metrics`, `/api/collectors` | Operations |
+| `GET /api/config`, `PATCH /api/config` | Effective config (token) |
+| `GET /api/queue`, `POST /api/queue/clear` | Queue depth / clear (token) |
+| `GET /api/logs`, `/api/logs/:id` | Ring-buffer operational log |
+| `GET /api/fim`, `/api/compliance`, `/api/diagnostics` | Feature visibility |
+| `GET /api/service`, `POST /api/service/:action` | Windows service state/control (token) |
+| `POST /api/decommission/purge` | Controlled data purge (token + confirm) |
+
+### `agent/src/state/` and `agent/src/logging/`
+
+Durable `state.json` (bookmarks, enrollment, FIM baseline, task dedup). Pino + rotating file logs under `logs/agent/` when data paths are initialized; in-memory `event-log` for GUI.
+
+### `service-host/` (Rust)
+
+Windows Service Control Manager wrapper: registers `CUSAAgent`, spawns `cusa-agent.exe` with `CUSA_DATA_DIR=C:\ProgramData\CUSA`, supervises child process.
+
+### `gui/` + `src-tauri/`
+
+React dashboard: Dashboard, Collectors, Configuration, FIM, Compliance, Logs, Diagnostics, Decommission.
+
+### `installer/wix/`
+
+WiX 4 MSI — files, service install, custom actions (ProgramData init, deploy.json), shortcuts (full build).
 
 ---
 
-## Data Flow: Events
+## Data flows
+
+### Events
 
 ```
-Windows Event Log
+Windows Event Log / journald / syslog / auditd / file tail
     ↓
-collectors/windows/event-channel.js
-    ↓ (raw Windows event)
-pipeline/normalize.js
-    ↓ (CUSA canonical event)
-queue/events.enqueue()
+collectors/*
     ↓
-wazuh/v4/event-serializer.js
-    ↓ (queue:location:message plaintext)
-wazuh/v4/secure-message.js
-    ↓ (encrypted TCP frame)
-transport/tcp.js → Manager:1514
+pipeline/normalize.js + validator
+    ↓
+queue/events
+    ↓
+wazuh/v4/event-serializer.js → encrypt → transport → Manager:1514
 ```
 
-## Data Flow: Inventory
+### Inventory / FIM / SCA state
 
 ```
-inventory/scanner.js
-    ↓ (internal inventory model)
-inventory/delta.js
-    ↓ (CREATE/MODIFY/DELETE ops)
-queue/state.enqueue()
+inventory/scanner.js or fim/registry/compliance
+    ↓
+queue/state
     ↓
 wazuh/v4/sync-protocol.js
-    ↓ (Start/Data/End session)
-transport/tcp.js → Manager:1514
-```
-
-## Data Flow: Commands
-
-```
-Manager → transport → wazuh/commands/receiver.js
-    ↓
-queue/commands.enqueue()     # persist BEFORE execute
-    ↓
-commands/handler.js
-    ↓
-active-response/executor.js  # allowlist check
-    ↓
-queue/command-results.enqueue()
     ↓
 transport → Manager
 ```
 
----
+### Commands
 
-## Configuration Model
-
-Three layers merged into effective config:
-
-| Layer | Source | GUI editable |
-|-------|--------|-------------|
-| Manager | Central policy via Wazuh | Locked fields |
-| Local | GUI / local config file | Yes |
-| Defaults | Agent built-in | Read-only |
-
-Flow: receive → authenticate → validate schema → compare version → stage → apply → health check → commit.
-
-Last-known-good config preserved on failure.
-
-```json
-{
-  "wazuh": {
-    "version": "5.x-released",
-    "manager": {
-      "address": "10.0.0.1",
-      "port": 1514,
-      "enrollmentPort": 1515
-    },
-    "enrollment": {
-      "password": null,
-      "groups": ["default"]
-    }
-  },
-  "queue": {
-    "memoryLimit": 10000,
-    "diskLimitMb": 256
-  },
-  "collectors": { ... },
-  "fim": { ... },
-  "compliance": { ... }
-}
+```
+Manager → transport → v4/client onManagerMessage
+    ↓
+queue/commands (persist)
+    ↓
+active-response/executor.js
+    ↓
+queue/command-results → transport
 ```
 
 ---
 
-## Technology Stack
+## Technology stack
 
 | Component | Technology |
-|-----------|-----------|
-| Agent runtime | Node.js, ES Modules, JavaScript only |
-| Validation | JSON Schema + Ajv |
-| Logging | Pino |
-| Local API | Fastify |
-| Queue storage | SQLite (preferred) or segmented spool files |
+|-----------|------------|
+| Agent runtime | Node.js ≥ 20, ESM, JavaScript |
+| Agent packaging | esbuild + postject → `cusa-agent.exe` |
+| Service host | Rust (`windows-service`) |
 | GUI | Tauri 2 + React + Vite |
-| Packaging | pkg → agent.exe, WiX MSI |
-| Testing | Node.js test runner |
+| Validation | JSON Schema + Ajv |
+| Logging | Pino + daily files under ProgramData |
+| Local API | Fastify |
+| Queue | JSONL durable spool (per-queue directories) |
+| MSI | WiX Toolset 4 |
+| Tests | Node.js built-in test runner |
 
-No TypeScript. No Redis/Kafka/PostgreSQL on endpoint.
-
----
-
-## Resource Constraints
-
-Designed for thousands of endpoints:
-
-- Bounded memory queue
-- Bounded disk spool
-- Async I/O throughout
-- Event batching before send
-- gzip compression where protocol requires
-- Minimal subprocess execution
-- Native OS APIs for collection (EventChannel, inotify, etc.)
+`wazuh.version` default `4.11` in `default.json`. v5 HTTPS adapter exists but is not the default production path.
 
 ---
 
-## Implementation Phases
+## Resource constraints
+
+- Bounded memory and disk queue (`queue.memoryLimit`, `queue.diskLimitMb`)
+- Event batching in flusher (50 events / 100 state items per tick)
+- Async I/O; collection via PowerShell/OS APIs and file tail
+- Wazuh message size cap (`message-limit.js`)
+
+---
+
+## Current product features (implemented in repo)
+
+1. Wazuh 4.x TCP enrollment (authd + API fallback), encrypted event transport, keepalive.
+2. Durable multi-queue buffering with reconnect and retry.
+3. Windows Security/System/Application event channels (incremental bookmarks).
+4. Optional Windows Sysmon, Defender, PowerShell collectors.
+5. Linux journald, syslog, auditd collectors.
+6. Optional custom log file tailing.
+7. JSON-schema validated internal events with agent/host enrichment.
+8. Scheduled system/package/process/interface/(Windows) port inventory with delta sync.
+9. Configurable FIM with SHA-256 baseline in state.
+10. Configurable Windows registry monitoring.
+11. SCA compliance engine with policy file and scheduled runs.
+12. Active response: kill process, firewall block, approved scripts, restart/reload.
+13. Manager command channel with deduplicated task IDs and result queue.
+14. In-agent update staging from signed manifest (SHA-256); MSI upgrade for deployments.
+15. Tamper detection on agent binary and secrets path.
+16. Localhost API + GUI: status, config patch, logs, diagnostics, service control, decommission.
+17. MSI install: service, ProgramData layout, deploy.json, uninstall/repair, optional GUI.
+18. Secrets encryption (DPAPI on Windows), local API token for writes.
+19. Decommission purge (GUI or API) and `PURGE_DATA` on MSI uninstall.
+
+---
+
+## MVP feature matrix (40-point checklist)
+
+Legend:
+
+| Status | Meaning |
+|--------|---------|
+| **Full** | Implemented end-to-end for typical deployment |
+| **Partial** | Core capability exists; needs config, platform scope, or follow-up hardening |
+| **None** | Not implemented |
+
+| # | Feature | Priority | Status | Notes |
+|---|---------|----------|--------|-------|
+| 1 | Agent installation & service | Must | **Partial** | Windows MSI + `CUSAAgent` service; dev is manual `npm start`; no Linux daemon package |
+| 2 | Agent enrollment | Must | **Full** | Authd + API enrollment, identity in secrets store |
+| 3 | Endpoint identification | Must | **Partial** | Hostname/OS/arch in events; IP/MAC lists not fully populated in pipeline |
+| 4 | Agent heartbeat | Must | **Full** | `keepalive.js` over manager connection |
+| 5 | Secure agent communication | Must | **Full** | v4 AES encrypted TCP payloads |
+| 6 | Central configuration | Must | **Partial** | `deploy.json` + GUI local overlay; no full manager agent.conf sync |
+| 7 | Windows event log collection | Must | **Full** | Configurable channels, bookmarks |
+| 8 | Linux log collection | Must | **Full** | journald, syslog, auditd |
+| 9 | Custom log file monitoring | Must | **Partial** | `fileTail` when enabled with paths |
+| 10 | Log filtering | Must | **Partial** | Incremental bookmark / record ID only; no rule engine for ID/severity |
+| 11 | Security event collection | Must | **Full** | Security channel + auditd |
+| 12 | File integrity monitoring | Must | **Partial** | Requires `fim.paths` configuration |
+| 13 | FIM baseline | Must | **Full** | Hashes/metadata in `state.fimBaseline` |
+| 14 | Registry monitoring (Windows) | Must | **Partial** | Requires `registry.keys` configuration |
+| 15 | Rootkit / suspicious system check | Should | **None** | — |
+| 16 | Security configuration assessment | Must | **Partial** | Engine present; requires `compliance.policyPath` |
+| 17 | System inventory | Must | **Full** | CPU, memory, hostname, OS |
+| 18 | Software inventory | Must | **Full** | Win32_Product / dpkg-query (platform limits) |
+| 19 | Network inventory | Must | **Partial** | Interfaces; no route table collector |
+| 20 | Process inventory | Must | **Full** | Scheduled scan |
+| 21 | Service inventory | Must | **None** | — |
+| 22 | User/group inventory | Should | **None** | — |
+| 23 | Open port / listening inventory | Should | **Partial** | Windows `Get-NetTCPConnection` only |
+| 24 | Vulnerability detection input | Must | **Partial** | Package inventory synced; CVE correlation is server-side |
+| 25 | Policy/compliance data to tbSIEM | Must | **Partial** | Same as SCA when policy configured |
+| 26 | Local event buffering | Must | **Full** | Durable queues |
+| 27 | Automatic reconnection | Must | **Full** | TCP backoff in `transport.js` |
+| 28 | Event queue management | Must | **Full** | Limits, retry, overflow via disk cap |
+| 29 | Event metadata enrichment | Must | **Partial** | Agent ID, hostname, OS; weak IP/MAC enrichment |
+| 30 | Agent logs | Must | **Full** | File logs + `/api/logs` + ring buffer |
+| 31 | Agent health monitoring | Must | **Full** | Health monitor + API |
+| 32 | Remote agent restart | Should | **Full** | Manager commands + `/api/service` + active response |
+| 33 | Agent upgrade | Must | **Partial** | Manifest download/stage; MSI primary; no signed WPK auto-apply |
+| 34 | Agent uninstall / decommission | Must | **Full** | MSI uninstall, purge, GUI decommission |
+| 35 | Active response framework | Must | **Full** | Allowlisted executor |
+| 36 | Process termination | Should | **Full** | `terminate_process` |
+| 37 | IP blocking action | Should | **Full** | `netsh` / `iptables` |
+| 38 | Custom response script | Should | **Full** | `approved_script` + SHA-256 |
+| 39 | Response audit logging | Must | **Partial** | Results queued; limited requester/policy audit fields |
+| 40 | Agent tamper detection | Should | **Partial** | Hash watch on binary + secrets |
+
+### Coverage summary
+
+| Metric | Count |
+|--------|------:|
+| **Full** | 20 / 40 |
+| **Partial** | 17 / 40 |
+| **None** | 3 / 40 |
+| **At least Partial** (addressed in codebase) | **37 / 40** (92.5%) |
+
+**Must-have rows only (32 items):** **16 Full**, **15 Partial**, **1 None** (service inventory #21) → **31 / 32** touched in code; **16 / 32** fully meet the MVP bar without gaps.
+
+Gaps to close for a stricter MVP sign-off: manager-driven agent configuration (#6), rule-based log filtering (#10), service inventory (#21), complete endpoint network identity on every event (#3, #29), and production-grade in-place upgrade (#33).
+
+---
+
+## Implementation phases
 
 | Phase | Scope | Status |
 |-------|-------|--------|
-| 0 | Research + docs + foundation | **Complete** |
-| 1 | Wazuh enrollment + event send + sync protocol | **Complete** (text sync markers; FlatBuffers TBD) |
-| 2 | Queue (memory + durable JSONL) | **Complete** |
-| 3 | Windows collectors (incremental bookmarks) | **Complete** |
-| 4 | Linux collectors (journald, syslog, auditd) | **Complete** |
-| 5 | Inventory + delta + state queue | **Complete** |
-| 6 | FIM + Registry + Compliance | **Complete** |
-| 7 | Commands + Active Response | **Complete** |
-| 8 | Updater + Tamper detection | **Complete** (wired; WPK signature TBD) |
-| 9 | Tauri GUI + local API | **Complete** (read-only config) |
-| 10 | Service + MSI packaging | **Deferred** |
+| 0 | Research + docs + foundation | Complete |
+| 1 | Wazuh enrollment + event send + sync | Complete |
+| 2 | Durable queues | Complete |
+| 3 | Windows collectors | Complete |
+| 4 | Linux collectors | Complete |
+| 5 | Inventory + delta | Complete |
+| 6 | FIM + registry + compliance | Complete |
+| 7 | Commands + active response | Complete |
+| 8 | Updater + tamper | Complete (WPK/signature hardening TBD) |
+| 9 | Tauri GUI + local API | Complete |
+| 10 | Service host + WiX MSI + ProgramData | **Complete** (see [BUILD.md](BUILD.md)) |
+| 10d | Signed updater, tray, dedicated service account | Planned / stub |
 
 ---
 
-## Directory Structure
+## Repository layout
 
 ```
 cusa/
 ├── agent/
+│   ├── config/                 # default.json, config.local.json (dev)
 │   ├── src/
 │   │   ├── bootstrap/
 │   │   ├── core/
@@ -369,8 +475,7 @@ cusa/
 │   │   ├── collectors/{interfaces,windows,linux,common}/
 │   │   ├── pipeline/
 │   │   ├── queue/
-│   │   ├── transport/
-│   │   ├── wazuh/{v4,v5,enrollment,events,state,commands,config,control,downloads}/
+│   │   ├── wazuh/{v4,v5,enrollment-defaults.js,client.js,version.js}
 │   │   ├── inventory/
 │   │   ├── fim/
 │   │   ├── registry/
@@ -381,12 +486,24 @@ cusa/
 │   │   ├── security/
 │   │   ├── state/
 │   │   ├── logging/
-│   │   └── platform/{windows,linux}/
-│   ├── config/
+│   │   └── platform/
 │   └── tests/
-├── gui/                    # Phase 9
-├── src-tauri/              # Phase 9
-├── installer/wix/            # Phase 10
+├── service-host/               # Rust Windows service
+├── gui/
+├── src-tauri/
+├── installer/wix/              # MSI
+├── installer/scripts/          # ProgramData init, purge
+├── updater-stub/
+├── scripts/                    # build-agent, release, stage, validate-msi
 ├── docs/
-└── scripts/
+└── package.json                # build:release, build:msi, tauri:dev
 ```
+
+---
+
+## Related documentation
+
+- [BUILD.md](BUILD.md) — build and install quick reference
+- [enterprise-deployment.md](enterprise-deployment.md) — silent MSI / SCCM
+- [windows-installer-architecture.md](windows-installer-architecture.md) — installer design detail
+- [wazuh-compatibility.md](wazuh-compatibility.md) — protocol notes (if present)

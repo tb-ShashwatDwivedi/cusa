@@ -1,6 +1,8 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { Collector } from '../interfaces/collector.js';
+import { buildWinevtPayload } from './winevt-format.js';
+import { buildPollCommand } from './winevt-poll.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -25,25 +27,36 @@ export class WindowsEventChannelCollector extends Collector {
     for (const channel of this.channels) {
       try {
         const bookmark = this.state.getBookmark('event-channel', channel);
-        const filter = bookmark
-          ? `Get-WinEvent -LogName '${channel}' -FilterXPath '*[System[(EventRecordID > ${bookmark})]]' -MaxEvents 50`
-          : `Get-WinEvent -LogName '${channel}' -MaxEvents 50`;
-        const args = ['-NoProfile', '-Command', `${filter} | ConvertTo-Json -Compress`];
-        const { stdout } = await execFileAsync('powershell.exe', args, { timeout: 30000 });
+        const script = buildPollCommand(channel, bookmark);
+        const { stdout } = await execFileAsync(
+          'powershell.exe',
+          ['-NoProfile', '-NonInteractive', '-Command', script],
+          { timeout: 45000, maxBuffer: 16 * 1024 * 1024 },
+        );
         if (!stdout.trim()) continue;
-        const events = JSON.parse(stdout.startsWith('[') ? stdout : `[${stdout}]`);
+
         let maxId = bookmark || 0;
-        for (const ev of events) {
-          const id = ev.RecordId || ev.Id;
+        for (const line of stdout.split(/\r?\n/).filter(Boolean)) {
+          let row;
+          try {
+            row = JSON.parse(line);
+          } catch {
+            continue;
+          }
+          const id = row.RecordId || row.Id;
           if (bookmark && id <= bookmark) continue;
+          if (!row.Event) continue;
+
+          const raw = buildWinevtPayload({ Message: row.Message, Event: row.Event });
           this.emit({
-            source: { platform: 'windows', collector: 'event-channel', channel },
-            event: { category: 'windows', type: 'event', action: String(ev.Id) },
-            raw: JSON.stringify(ev),
+            source: { platform: 'windows', collector: 'event-channel', channel: 'EventChannel' },
+            event: { category: 'windows', type: 'event', action: String(row.Id || '') },
+            raw,
           });
           if (id && id > maxId) maxId = id;
         }
         if (maxId && maxId !== bookmark) this.state.setBookmark('event-channel', channel, maxId);
+        this.lastError = null;
       } catch (err) {
         this.lastError = err.message;
       }

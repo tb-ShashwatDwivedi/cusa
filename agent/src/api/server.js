@@ -96,6 +96,12 @@ export async function createApiServer(agent) {
     state: agent.queue.state.depth(),
     commands: agent.queue.commands.depth(),
   }));
+  app.post('/api/queue/clear', async (req, reply) => {
+    if (!requireToken(req, reply)) return;
+    await agent.queue.clearAll();
+    agent.health?.setQueue('ok', agent.queue.totalDepth());
+    return { ok: true, depth: agent.queue.totalDepth() };
+  });
   app.get('/api/logs', async (req) => {
     const { category, limit, since, search } = req.query;
     return {

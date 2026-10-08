@@ -53,6 +53,23 @@ function parseIdentity(item, agentName) {
   };
 }
 
+/** @param {object} base @param {string} token @param {string} agentId @param {string} group */
+async function assignAgentGroup(base, token, agentId, group) {
+  if (!group) return;
+  const path = `/agents/${agentId}/group/${encodeURIComponent(group)}`;
+  const res = await apiRequest({
+    hostname: base.host,
+    port: base.apiPort || 55000,
+    path,
+    method: 'PUT',
+    headers: { Authorization: `Bearer ${token}` },
+    rejectUnauthorized: base.insecure !== true,
+  });
+  if (res.status !== 200) {
+    throw new Error(`Assign group failed (${res.status}): ${res.body}`);
+  }
+}
+
 /** @param {object} opts @param {string} token */
 async function fetchExistingAgentKey(opts, token) {
   const search = await apiGet(opts, token, `/agents?search=${encodeURIComponent(opts.agentName)}`);
@@ -116,7 +133,15 @@ export async function enrollViaApi(opts) {
   if (agentRes.status === 200) {
     const item = agentJson.data?.affected_items?.[0] || agentJson.data;
     const identity = parseIdentity(item, opts.agentName);
-    if (identity) return identity;
+    if (identity) {
+      const group = opts.groups?.split(',')[0]?.trim() || 'default';
+      try {
+        await assignAgentGroup(base, token, identity.id, group);
+      } catch {
+        // group may already be set; authd G:'default' is the fallback path
+      }
+      return identity;
+    }
   }
 
   throw new Error(`API enroll failed (${agentRes.status}): ${agentRes.body}`);

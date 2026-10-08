@@ -1,0 +1,286 @@
+Yes. For **Wazuh 4.11.2**, there are two different formats you need to keep separate:
+
+1. **The Windows event payload** your agent gives to Wazuh.
+2. **The secure transport format** used when that event travels over TCP/1514.
+
+Mixing those up is a very efficient way to build an agent that enrolls perfectly and then sends absolutely nothing useful. Humanity has invented layers precisely to make this happen.
+
+## 1. Windows event format your agent should produce
+
+For Wazuh 4.x, the Windows `eventchannel` collector produces a JSON wrapper containing `Message` and the raw Windows Event XML:
+
+```json
+{
+  "Message": "An account failed to log on.",
+  "Event": "<Event xmlns='http://schemas.microsoft.com/win/2004/08/events/event'><System><Provider Name='Microsoft-Windows-Security-Auditing'/><EventID>4625</EventID><Level>0</Level><Task>12544</Task><TimeCreated SystemTime='2026-10-08T09:30:12.123Z'/><EventRecordID>12345</EventRecordID><Channel>Security</Channel><Computer>WIN-PC01</Computer></System><EventData><Data Name='SubjectUserName'>SYSTEM</Data><Data Name='TargetUserName'>admin</Data><Data Name='LogonType'>3</Data><Data Name='IpAddress'>192.168.1.50</Data></EventData></Event>"
+}
+```
+
+Wazuh's documentation describes Windows `eventchannel` as including the event fields and, for the 4.x format, wrapping the human-readable message and raw XML in this JSON structure. [GitHub](https://github.com/wazuh/wazuh/blob/main/docs/ref/modules/logcollector/collectors.md?utm_source=chatgpt.com)
+
+The official Windows collector configuration is:
+
+```xml
+<localfile>
+    <location>Security</location>
+    <log_format>eventchannel</log_format>
+</localfile>
+```
+
+and Wazuh collects the Windows Event Channel data from that source. [Wazuh Documentation](https://documentation.wazuh.com/current/user-manual/capabilities/log-data-collection/configuration.html?utm_source=chatgpt.com)
+
+### Example for Event ID 4624
+
+Your CUSA agent could construct an event payload like:
+
+```json
+{
+  "Message": "An account was successfully logged on.",
+  "Event": "<Event xmlns='http://schemas.microsoft.com/win/2004/08/events/event'><System><Provider Name='Microsoft-Windows-Security-Auditing' Guid='{54849625-5478-4994-a5ba-3e3b0328c30d}'/><EventID>4624</EventID><Version>2</Version><Level>0</Level><Task>12544</Task><Opcode>0</Opcode><Keywords>0x8020000000000000</Keywords><TimeCreated SystemTime='2026-10-08T09:30:12.1234567Z'/><EventRecordID>12345</EventRecordID><Correlation/><Execution ProcessID='700' ThreadID='800'/><Channel>Security</Channel><Computer>WIN-PC01</Computer><Security/></System><EventData><Data Name='SubjectUserSid'>S-1-5-18</Data><Data Name='SubjectUserName'>SYSTEM</Data><Data Name='TargetUserName'>admin</Data><Data Name='LogonType'>2</Data><Data Name='IpAddress'>192.168.1.50</Data></EventData></Event>"
+}
+```
+
+The exact `EventData` fields depend on the Windows event.
+
+---
+
+## 2. What Wazuh ultimately turns this into
+
+After the manager decodes and analyzes it, you'll see something conceptually like:
+
+```json
+{
+  "timestamp": "2026-10-08T09:30:12.123+0000",
+  "agent": {
+    "id": "001",
+    "name": "WIN-PC01",
+    "ip": "192.168.1.100"
+  },
+  "manager": {
+    "name": "wazuh-manager"
+  },
+  "full_log": "{\"Message\":\"...\",\"Event\":\"<Event ...\"}",
+  "decoder": {
+    "name": "windows_eventchannel"
+  },
+  "data": {
+    "win": {
+      "system": {
+        "providerName": "Microsoft-Windows-Security-Auditing",
+        "eventID": "4624",
+        "channel": "Security",
+        "computer": "WIN-PC01"
+      },
+      "eventdata": {
+        "TargetUserName": "admin",
+        "LogonType": "2",
+        "IpAddress": "192.168.1.50"
+      }
+    }
+  }
+}
+```
+
+A real Wazuh Windows event example shows this general structure, with `full_log`, `decoder`, `data.win.system`, and `data.win.eventdata`. [GitHub](https://github.com/wazuh/wazuh-agent/issues/11?utm_source=chatgpt.com)
+
+**You should not try to send that final alert JSON from your agent.**
+
+That is the **manager-side result**, not the agent transport format.
+
+---
+
+# 3. What your agent actually sends over TCP 1514
+
+This is the important part.
+
+Your agent should NOT do:
+
+```javascript
+socket.write(JSON.stringify(event));
+```
+
+Instead, the Windows event becomes the `<Event>` portion of Wazuh's secure message.
+
+Conceptually:
+
+```text
+<Event>
+    ↓
+Random + Global Counter + Local Counter + ":" + Event
+    ↓
+MD5
+    ↓
+append hash + block
+    ↓
+zlib/DEFLATE
+    ↓
+padding
+    ↓
+AES encryption
+    ↓
+Wazuh payload
+    ↓
+4-byte little-endian payload length
+    ↓
+TCP 1514
+```
+
+Wazuh documents the block as:
+
+```text
+<Random><Global Counter>:<Local Counter>:<Event>
+```
+
+then hashes it with MD5, compresses it with DEFLATE, pads it, encrypts it, and finally sends the resulting payload. [Wazuh Documentation](https://documentation.wazuh.com/current/development/message-format.html?utm_source=chatgpt.com)
+
+For TCP, Wazuh uses:
+
+```text
+Send(<Size><Payload>)
+```
+
+where:
+
+```text
+Size       = 4 bytes
+Type       = unsigned
+Endian     = little-endian
+``` :chatgpt-content-reference{index="4"}
+
+
+So your network packet is **not**:
+
+```text
+JSON
+```
+
+It is more like:
+
+```text
+[4-byte payload length][Wazuh encrypted payload]
+```
+
+---
+
+# 4. The key is also involved in encryption
+
+The client key obtained during enrollment is not your API password.
+
+Wazuh derives the encryption key from the client-key information. Its documented formula is:
+
+```text
+Key = MD5(Pass) + MD5(MD5(Name) + MD5(ID))[0:15]
+```
+
+where:
+
+```text
+ID   = agent ID
+Name = agent name
+Pass = client key/password from client.keys
+```
+
+Wazuh documents the AES/Blowfish encryption process and this key derivation in the secure message format specification. [Wazuh Documentation](https://documentation.wazuh.com/current/development/message-format.html?utm_source=chatgpt.com)
+
+So your CUSA agent needs something along these lines:
+
+```text
+Enrollment
+    |
+    +--> agent ID
+    +--> agent name
+    +--> client key
+            |
+            v
+      derive crypto key
+            |
+            v
+       encrypt event
+            |
+            v
+        TCP 1514
+```
+
+---
+
+# 5. What I recommend for your CUSA Agent
+
+Your internal event object can be much cleaner:
+
+```javascript
+const event = {
+    Message: windowsEvent.message,
+    Event: windowsEvent.rawXml
+};
+```
+
+For example:
+
+```javascript
+const event = {
+    Message: "An account failed to log on.",
+    Event: `<Event xmlns='http://schemas.microsoft.com/win/2004/08/events/event'>
+        <System>
+            <Provider Name='Microsoft-Windows-Security-Auditing'/>
+            <EventID>4625</EventID>
+            <Level>0</Level>
+            <Channel>Security</Channel>
+            <Computer>WIN-PC01</Computer>
+        </System>
+        <EventData>
+            <Data Name='TargetUserName'>admin</Data>
+            <Data Name='LogonType'>3</Data>
+            <Data Name='IpAddress'>192.168.1.50</Data>
+        </EventData>
+    </Event>`
+};
+```
+
+Then:
+
+```text
+event object
+    ↓
+JSON stringify
+    ↓
+Wazuh secure-message block
+    ↓
+MD5
+    ↓
+DEFLATE
+    ↓
+padding
+    ↓
+AES
+    ↓
+4-byte length prefix
+    ↓
+TCP 1514
+```
+
+---
+
+## One important version detail
+
+The current Wazuh development documentation notes a **Wazuh 5.0 change** where Windows `eventchannel` forwarding switches from the JSON wrapper to forwarding the native Windows Event XML directly. For **your Wazuh 4.11.2 target**, the 4.x JSON wrapper is the relevant format. [GitHub](https://github.com/wazuh/wazuh/blob/main/docs/ref/modules/logcollector/collectors.md?utm_source=chatgpt.com)
+
+So for your implementation, target:
+
+```json
+{
+  "Message": "...",
+  "Event": "<Event>...</Event>"
+}
+```
+
+inside the **Wazuh secure message protocol**.
+
+### Official documents
+
+[Wazuh Standard Message Format](https://documentation.wazuh.com/current/development/message-format.html) [Wazuh Documentation](https://documentation.wazuh.com/current/development/message-format.html?utm_source=chatgpt.com)
+
+[Wazuh Windows log collection](https://documentation.wazuh.com/current/user-manual/capabilities/log-data-collection/configuration.html) [Wazuh Documentation](https://documentation.wazuh.com/current/user-manual/capabilities/log-data-collection/configuration.html?utm_source=chatgpt.com)
+
+[Wazuh Logcollector EventChannel implementation](https://github.com/wazuh/wazuh/blob/main/docs/ref/modules/logcollector/collectors.md) [GitHub](https://github.com/wazuh/wazuh/blob/main/docs/ref/modules/logcollector/collectors.md?utm_source=chatgpt.com)
+
+**For your current bug, the critical implementation is not merely the JSON above. It is the entire `1514 secure message` construction.** If your agent currently has code that takes the JSON and sends it directly to port 1514, that is the first thing I would replace.

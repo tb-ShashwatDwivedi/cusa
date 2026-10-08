@@ -111,6 +111,16 @@ export class QueueManager {
     this.running = false;
   }
 
+  /** Wipe all queued items (does not affect Wazuh counters on manager). */
+  async clearAll() {
+    await Promise.all([
+      this.events.clear(),
+      this.state.clear(),
+      this.commands.clear(),
+      this.results.clear(),
+    ]);
+  }
+
   /** Best-effort flush before shutdown. @param {import('../wazuh/client.js').WazuhClient} wazuh @param {number} [timeoutMs] */
   async drain(wazuh, timeoutMs = 15000) {
     this.running = false;

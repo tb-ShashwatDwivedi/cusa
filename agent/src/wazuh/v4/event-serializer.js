@@ -1,6 +1,6 @@
 /**
  * Map CUSA canonical events to Wazuh queue:location:message plaintext.
- * @see docs/event-schema.md
+ * @see docs/README.md §3.4 / §4
  */
 
 const COLLECTOR_QUEUE = {
@@ -18,10 +18,16 @@ const COLLECTOR_QUEUE = {
   agent: '1',
 };
 
+const EVENTCHANNEL_COLLECTORS = new Set(['event-channel', 'sysmon', 'defender', 'powershell']);
+
 /** @param {object} event */
 export function serializeEvent(event) {
-  const queue = COLLECTOR_QUEUE[event.source?.collector] || '1';
-  const location = event.source?.channel || event.source?.path || event.source?.collector || 'cusa';
+  const collector = event.source?.collector;
+  const queue = COLLECTOR_QUEUE[collector] || '1';
+  // Wazuh winevtchannel requires location exactly EventChannel for queue f.
+  const location = EVENTCHANNEL_COLLECTORS.has(collector)
+    ? 'EventChannel'
+    : event.source?.channel || event.source?.path || collector || 'cusa';
   const raw =
     typeof event.raw === 'string' ? event.raw : JSON.stringify(event.raw ?? event);
   return `${queue}:${location}:${raw}`;

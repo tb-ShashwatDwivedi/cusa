@@ -26,6 +26,7 @@ import {
   getPaths,
 } from '../config/loader.js';
 import { purgeAgentData } from '../platform/decommission.js';
+import { isCollectorEnabled } from '../collectors/config-key.js';
 import { controlService, queryServiceState } from '../platform/service-control.js';
 import { initSecretsEncryption } from '../security/secrets.js';
 import { ensureApiToken } from '../security/api-token.js';
@@ -64,7 +65,8 @@ export class Agent {
       onRestart: () => process.exit(0),
       onReload: async () => this.reloadConfig(),
     });
-    const tamperPaths = [process.execPath, this.paths.state, this.paths.secrets];
+    // ponytail: state.json mutates every poll/sync — watching it floods Wazuh with 1:agent: noise.
+    const tamperPaths = [process.execPath, this.paths.secrets];
     this.tamper = new TamperDetector({
       paths: tamperPaths,
       onTamper: (a) => this.handleTamper(a),
@@ -95,7 +97,7 @@ export class Agent {
     for (const c of this.collectors) {
       c.setEventHandler((partial) => this.ingestEvent(partial));
       this.health.registerCollector(c.name, () => c.health());
-      if (this.config.collectors?.[c.name]?.enabled !== false) await c.start();
+      if (isCollectorEnabled(this.config.collectors, c.name)) await c.start();
     }
 
     if (this.config.fim?.paths?.length) {
@@ -220,11 +222,8 @@ export class Agent {
   }
 
   async handleTamper(alert) {
-    await this.ingestEvent({
-      source: { platform: process.platform === 'win32' ? 'windows' : 'linux', collector: 'agent' },
-      event: { category: 'intrusion_detection', type: 'tamper', severity: 'critical' },
-      raw: JSON.stringify(alert),
-    });
+    eventLog.agent('Tamper detection', alert, 'warn');
+    this.logger.warn({ alert }, 'Tamper detection');
   }
 
   /** @param {object} patch nested partial config update */
@@ -261,7 +260,7 @@ export class Agent {
     for (const c of this.collectors) {
       c.setEventHandler((partial) => this.ingestEvent(partial));
       this.health.registerCollector(c.name, () => c.health());
-      if (this.config.collectors?.[c.name]?.enabled !== false) await c.start();
+      if (isCollectorEnabled(this.config.collectors, c.name)) await c.start();
     }
     await this.compliance.load();
     this.wazuh.options.manager = this.config.wazuh.manager;

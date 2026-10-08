@@ -105,20 +105,6 @@ export default function App() {
             );
           })}
         </nav>
-
-        <div className="sidebar-footer">
-          <div className="agent-mini">
-            <StatusPill label={serviceLabel} tone={serviceTone} pulse={serviceUp} />
-            <EnrollmentStatus
-              status={status?.enrollment}
-              agentId={status?.agentId}
-              manager={status?.manager}
-              connected={connected}
-              compact
-            />
-            <StatusPill label={connectionLabel} tone={connectionTone} pulse={connected && !error} />
-          </div>
-        </div>
       </aside>
 
       <div className="shell">

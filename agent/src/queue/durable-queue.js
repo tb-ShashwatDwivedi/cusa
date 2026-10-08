@@ -29,6 +29,28 @@ export class DurableQueue {
       this.pending = [];
     }
     await this.reloadSpool();
+    await this.compactPending();
+  }
+
+  /** Drop pending IDs with no in-memory/spool payload (e.g. after agent restart). */
+  async compactPending() {
+    const live = new Set(this.memory.map((i) => i.id));
+    if (this.inFlight) live.add(this.inFlight.id);
+    try {
+      const raw = await readFile(this.spoolPath, 'utf8');
+      for (const line of raw.trim().split('\n').filter(Boolean)) {
+        try {
+          live.add(JSON.parse(line).id);
+        } catch {
+          // skip bad line
+        }
+      }
+    } catch {
+      // no spool
+    }
+    const before = this.pending.length;
+    this.pending = this.pending.filter((id) => live.has(id));
+    if (this.pending.length !== before) await this.persistPending();
   }
 
   async reloadSpool() {
@@ -120,6 +142,18 @@ export class DurableQueue {
   }
 
   depth() {
-    return this.memory.length + this.pending.length + (this.inFlight ? 1 : 0);
+    return this.pending.length;
+  }
+
+  async clear() {
+    this.memory = [];
+    this.pending = [];
+    this.inFlight = null;
+    await writeFile(this.pendingPath, '[]');
+    try {
+      await writeFile(this.spoolPath, '');
+    } catch {
+      // no spool yet
+    }
   }
 }
