@@ -13,6 +13,7 @@ export class TcpTransport extends EventEmitter {
     this.reconnectMs = 1000;
     this.maxReconnectMs = 60000;
     this.shouldRun = false;
+    this.reconnectTimer = null;
   }
 
   start() {
@@ -20,8 +21,19 @@ export class TcpTransport extends EventEmitter {
     this.connect();
   }
 
+  detachSocket() {
+    const sock = this.socket;
+    if (!sock) return;
+    sock.removeAllListeners();
+    sock.destroy();
+    this.socket = null;
+    this.connected = false;
+    this.buffer = Buffer.alloc(0);
+  }
+
   connect() {
     if (!this.shouldRun) return;
+    this.detachSocket();
     this.socket = net.connect({ host: this.host, port: this.port }, () => {
       this.connected = true;
       this.reconnectMs = 1000;
@@ -34,9 +46,14 @@ export class TcpTransport extends EventEmitter {
     });
     this.socket.on('close', () => {
       this.connected = false;
-      this.socket = null;
+      this.detachSocket();
       this.emit('disconnect');
-      if (this.shouldRun) setTimeout(() => this.connect(), this.reconnectMs);
+      if (this.shouldRun) {
+        if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
+        const jitter = Math.floor(Math.random() * 1000);
+        this.reconnectTimer = setTimeout(() => this.connect(), this.reconnectMs + jitter);
+        this.reconnectTimer.unref?.();
+      }
       this.reconnectMs = Math.min(this.reconnectMs * 2, this.maxReconnectMs);
     });
   }
@@ -68,6 +85,11 @@ export class TcpTransport extends EventEmitter {
 
   stop() {
     this.shouldRun = false;
-    this.socket?.destroy();
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
+    this.detachSocket();
+    this.removeAllListeners();
   }
 }

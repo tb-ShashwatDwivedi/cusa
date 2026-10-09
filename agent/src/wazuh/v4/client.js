@@ -290,7 +290,7 @@ export class WazuhAdapter {
   }
 
   onCommand(handler) {
-    this.commandHandlers.push(handler);
+    this.commandHandlers = [handler];
   }
 
   async pollCommands() {
@@ -303,7 +303,11 @@ export class WazuhAdapter {
   }
 
   async fetchConfiguration() {
-    return null;
+    const { loadManagerAgentConf } = await import('./central-config.js');
+    const { dirname } = await import('node:path');
+    const root = dirname(this.options.dataDir || '.');
+    const loaded = await loadManagerAgentConf(root);
+    return loaded?.patch || null;
   }
 
   async sendHealth() {
@@ -315,5 +319,7 @@ export class WazuhAdapter {
     this.stopKeepalive();
     this.transport?.stop();
     this.transport = null;
+    this.commandHandlers = [];
+    this.syncAckHandlers = [];
   }
 }

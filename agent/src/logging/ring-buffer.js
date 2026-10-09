@@ -1,14 +1,32 @@
 import { randomUUID } from 'node:crypto';
 
-/** @typedef {{ id: string, ts: string, category: string, level: string, message: string, source?: string, channel?: string, preview?: string, raw?: unknown, meta?: object }} LogEntry */
+/** @typedef {{ id: string, ts: string, category: string, level: string, message: string, source?: string, channel?: string, preview?: string, meta?: object }} LogEntry */
 
 export class RingBuffer {
-  /** @param {number} capacity */
-  constructor(capacity = 5000) {
+  /**
+   * @param {number} capacity max entries
+   * @param {number} [maxBytes] max retained payload bytes (approx)
+   */
+  constructor(capacity = 5000, maxBytes = 2 * 1024 * 1024) {
     this.capacity = capacity;
+    this.maxBytes = maxBytes;
+    this.bytes = 0;
     /** @type {LogEntry[]} */
     this.items = [];
     this.seq = 0;
+  }
+
+  entryBytes(entry) {
+    let n = (entry.message?.length || 0) + (entry.preview?.length || 0);
+    if (entry.meta) n += JSON.stringify(entry.meta).length;
+    return n + 200;
+  }
+
+  trimBytes() {
+    while (this.items.length && this.bytes > this.maxBytes) {
+      const removed = this.items.shift();
+      if (removed) this.bytes -= this.entryBytes(removed);
+    }
   }
 
   /** @param {Omit<LogEntry, 'id'|'ts'> & { ts?: string }} entry */
@@ -22,13 +40,15 @@ export class RingBuffer {
       source: entry.source,
       channel: entry.channel,
       preview: entry.preview,
-      raw: entry.raw,
       meta: entry.meta,
     };
     this.items.push(item);
+    this.bytes += this.entryBytes(item);
     if (this.items.length > this.capacity) {
-      this.items.splice(0, this.items.length - this.capacity);
+      const removed = this.items.splice(0, this.items.length - this.capacity);
+      for (const r of removed) this.bytes -= this.entryBytes(r);
     }
+    this.trimBytes();
     this.seq += 1;
     return item;
   }
@@ -47,7 +67,7 @@ export class RingBuffer {
           i.source?.toLowerCase().includes(q),
       );
     }
-    const limit = opts.limit || 200;
+    const limit = Math.min(opts.limit || 200, 500);
     return list.slice(-limit).reverse();
   }
 

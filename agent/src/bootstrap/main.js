@@ -2,9 +2,19 @@ import { loadConfig } from '../config/loader.js';
 import { createLogger, initFileLogging, shutdownFileLogging } from '../logging/logger.js';
 import { eventLog } from '../logging/event-log.js';
 import { Agent } from '../core/agent.js';
+import { acquireSingleInstanceLock, releaseSingleInstanceLock } from '../platform/single-instance.js';
+import { getPaths } from '../config/loader.js';
 
 async function main() {
   const config = await loadConfig(process.env.CUSA_CONFIG || undefined);
+  const paths = config._paths || getPaths(config.agent?.dataDir);
+  if (paths?.root) {
+    const ok = await acquireSingleInstanceLock(paths.root);
+    if (!ok) {
+      console.error('Another CUSA agent instance is already running');
+      process.exit(1);
+    }
+  }
   if (config._paths?.logs) {
     await initFileLogging(config._paths.logs);
   }
@@ -15,6 +25,7 @@ async function main() {
     eventLog.agent(`Shutdown signal received (${signal})`, { signal }, 'warn');
     log.info({ signal }, 'Shutdown signal received');
     await agent.stop();
+    if (paths?.root) await releaseSingleInstanceLock(paths.root);
     shutdownFileLogging();
     process.exit(0);
   };

@@ -17,7 +17,7 @@ describe('event log', () => {
     const row = collected.find((e) => e.source === 'event-channel');
     assert.ok(row);
     assert.equal(row.preview?.endsWith('…'), true);
-    assert.equal(String(row.raw).length, 300);
+    assert.equal(row.raw, undefined);
   });
 
   it('retrieves full entry by id', () => {

@@ -1,6 +1,9 @@
 import { appendFile, readFile, writeFile, mkdir, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
+import { forEachLine, readFirstLine, shiftFirstLine } from './spool-io.js';
+
+const DEFAULT_MEMORY_LIMIT = 500;
 
 export class DurableQueue {
   /**
@@ -13,11 +16,14 @@ export class DurableQueue {
     this.spoolPath = join(this.dir, 'spool.jsonl');
     this.pendingPath = join(this.dir, 'pending.json');
     this.diskLimitMb = opts.diskLimitMb || 256;
-    this.memoryLimit = opts.memoryLimit || 10000;
+    this.memoryLimit = opts.memoryLimit ?? DEFAULT_MEMORY_LIMIT;
     this.maxRetries = opts.maxRetries || 10;
     this.pending = [];
     this.memory = [];
     this.inFlight = null;
+    this.dropped = 0;
+    this.spoolBytes = 0;
+    this.oldestCreatedAt = null;
   }
 
   async init() {
@@ -30,6 +36,7 @@ export class DurableQueue {
     }
     await this.reloadSpool();
     await this.compactPending();
+    this.spoolBytes = await this.spoolSizeBytes();
   }
 
   /** Drop pending IDs with no in-memory/spool payload (e.g. after agent restart). */
@@ -37,14 +44,13 @@ export class DurableQueue {
     const live = new Set(this.memory.map((i) => i.id));
     if (this.inFlight) live.add(this.inFlight.id);
     try {
-      const raw = await readFile(this.spoolPath, 'utf8');
-      for (const line of raw.trim().split('\n').filter(Boolean)) {
+      await forEachLine(this.spoolPath, (line) => {
         try {
           live.add(JSON.parse(line).id);
         } catch {
           // skip bad line
         }
-      }
+      });
     } catch {
       // no spool
     }
@@ -54,25 +60,35 @@ export class DurableQueue {
   }
 
   async reloadSpool() {
-    try {
-      const raw = await readFile(this.spoolPath, 'utf8');
-      const lines = raw.trim().split('\n').filter(Boolean);
-      for (const line of lines) {
-        this.memory.push(JSON.parse(line));
+    while (this.memory.length < this.memoryLimit) {
+      let line;
+      try {
+        line = await readFirstLine(this.spoolPath);
+      } catch {
+        break;
       }
-      if (lines.length) await writeFile(this.spoolPath, '');
+      if (!line) break;
+      try {
+        this.memory.push(JSON.parse(line));
+        await shiftFirstLine(this.spoolPath);
+      } catch {
+        break;
+      }
+    }
+    this.spoolBytes = await this.spoolSizeBytes();
+  }
+
+  async spoolSizeBytes() {
+    try {
+      const st = await stat(this.spoolPath);
+      return st.size;
     } catch {
-      // no spool yet
+      return 0;
     }
   }
 
   async spoolSizeMb() {
-    try {
-      const st = await stat(this.spoolPath);
-      return st.size / (1024 * 1024);
-    } catch {
-      return 0;
-    }
+    return (await this.spoolSizeBytes()) / (1024 * 1024);
   }
 
   /** @param {string} type @param {object} payload */
@@ -81,11 +97,17 @@ export class DurableQueue {
     this.memory.push(item);
     if (this.memory.length > this.memoryLimit) {
       const overflow = this.memory.splice(0, this.memory.length - this.memoryLimit);
-      if (await this.spoolSizeMb() < this.diskLimitMb) {
-        await appendFile(this.spoolPath, overflow.map((o) => JSON.stringify(o)).join('\n') + '\n');
+      const spoolMb = await this.spoolSizeMb();
+      if (spoolMb < this.diskLimitMb) {
+        const chunk = overflow.map((o) => JSON.stringify(o)).join('\n') + '\n';
+        await appendFile(this.spoolPath, chunk);
+        this.spoolBytes += Buffer.byteLength(chunk);
+      } else {
+        this.dropped += overflow.length;
       }
     }
     this.pending.push(item.id);
+    if (!this.oldestCreatedAt) this.oldestCreatedAt = item.createdAt;
     await this.persistPending();
     return item.id;
   }
@@ -109,11 +131,10 @@ export class DurableQueue {
       item = this.memory.shift();
     } else {
       try {
-        const raw = await readFile(this.spoolPath, 'utf8');
-        const lines = raw.trim().split('\n').filter(Boolean);
-        if (!lines.length) return null;
-        item = JSON.parse(lines[0]);
-        await writeFile(this.spoolPath, lines.slice(1).join('\n') + (lines.length > 1 ? '\n' : ''));
+        const line = await shiftFirstLine(this.spoolPath);
+        if (!line) return null;
+        item = JSON.parse(line);
+        this.spoolBytes = await this.spoolSizeBytes();
       } catch {
         return null;
       }
@@ -127,6 +148,7 @@ export class DurableQueue {
     this.pending = this.pending.filter((p) => p !== id);
     if (this.inFlight?.id === id) this.inFlight = null;
     await this.persistPending();
+    if (this.memory.length < this.memoryLimit) await this.reloadSpool();
   }
 
   /** @param {string} id */
@@ -135,7 +157,12 @@ export class DurableQueue {
     const item = this.inFlight;
     item.attempts += 1;
     this.inFlight = null;
-    if (item.attempts >= this.maxRetries) return;
+    if (item.attempts >= this.maxRetries) {
+      this.dropped += 1;
+      this.pending = this.pending.filter((p) => p !== id);
+      await this.persistPending();
+      return;
+    }
     this.memory.unshift(item);
     this.pending.push(item.id);
     await this.persistPending();
@@ -145,10 +172,24 @@ export class DurableQueue {
     return this.pending.length;
   }
 
+  stats() {
+    return {
+      depth: this.depth(),
+      memoryItems: this.memory.length,
+      spoolBytes: this.spoolBytes,
+      dropped: this.dropped,
+      overflowCount: this.dropped,
+      inFlight: this.inFlight ? 1 : 0,
+      oldestEventAt: this.oldestCreatedAt,
+    };
+  }
+
   async clear() {
     this.memory = [];
     this.pending = [];
     this.inFlight = null;
+    this.dropped = 0;
+    this.spoolBytes = 0;
     await writeFile(this.pendingPath, '[]');
     try {
       await writeFile(this.spoolPath, '');

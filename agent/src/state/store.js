@@ -1,4 +1,4 @@
-import { readFile, writeFile, mkdir } from 'node:fs/promises';
+import { readFile, writeFile, mkdir, rename } from 'node:fs/promises';
 import { join, dirname } from 'node:path';
 
 export class StateStore {
@@ -38,15 +38,28 @@ export class StateStore {
     try {
       const raw = await readFile(this.path, 'utf8');
       this.data = { ...this.data, ...JSON.parse(raw) };
-    } catch {
-      await mkdir(dirname(this.path), { recursive: true }).catch(() => {});
+    } catch (err) {
+      try {
+        const bak = await readFile(`${this.path}.bak`, 'utf8');
+        this.data = { ...this.data, ...JSON.parse(bak) };
+      } catch {
+        await mkdir(dirname(this.path), { recursive: true }).catch(() => {});
+      }
     }
     return this.data;
   }
 
   async save() {
     await mkdir(dirname(this.path), { recursive: true }).catch(() => {});
-    await writeFile(this.path, JSON.stringify(this.data, null, 2));
+    const tmp = `${this.path}.tmp`;
+    const body = JSON.stringify(this.data, null, 2);
+    await writeFile(tmp, body);
+    try {
+      await rename(tmp, this.path);
+      await writeFile(`${this.path}.bak`, body);
+    } catch {
+      await writeFile(this.path, body);
+    }
   }
 
   nextCounters() {

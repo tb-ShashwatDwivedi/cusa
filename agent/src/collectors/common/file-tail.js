@@ -6,7 +6,7 @@ export class FileTailCollector extends Collector {
   constructor(config) {
     super('file-tail', config);
     this.positions = new Map();
-    this.timers = [];
+    this.timers = new Map();
   }
 
   async start() {
@@ -46,14 +46,17 @@ export class FileTailCollector extends Collector {
       } catch {
         // file may not exist yet
       }
-      this.timers.push(setTimeout(poll, this.config.intervalMs || 2000));
+      const delay = this.config.intervalMs || 2000;
+      const prev = this.timers.get(path);
+      if (prev) clearTimeout(prev);
+      this.timers.set(path, setTimeout(poll, delay));
     };
     poll();
   }
 
   async stop() {
     await super.stop();
-    for (const t of this.timers) clearTimeout(t);
-    this.timers = [];
+    for (const t of this.timers.values()) clearTimeout(t);
+    this.timers.clear();
   }
 }

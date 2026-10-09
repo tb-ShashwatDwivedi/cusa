@@ -206,7 +206,7 @@ File: `agent/config/default.json`
 
 | Key | Default | Description |
 |-----|---------|-------------|
-| `memoryLimit` | `10000` | Max in-memory items per queue |
+| `memoryLimit` | `500` | Max in-memory items per queue (overflow spills to JSONL spool) |
 | `diskLimitMb` | `256` | Max JSONL spool size when memory overflows |
 | `flushIntervalMs` | `1000` | How often events are sent to manager |
 | `maxRetries` | `10` | Requeue attempts on send failure |
@@ -901,6 +901,7 @@ Enrollment failure is non-fatal; the agent retries with backoff. Fix manager rea
 | [windows-installation.md](windows-installation.md) | MSI install steps |
 | [enterprise-deployment.md](enterprise-deployment.md) | Silent push, SCCM |
 | [architecture.md](architecture.md) | Module boundaries, data flows, tech stack |
+| [mvp-verification-guide.md](mvp-verification-guide.md) | Verify all 40 MVP features (GUI, API, Wazuh 4.11.2) |
 | [wazuh-compatibility.md](wazuh-compatibility.md) | Full Wazuh protocol specification |
 | [wazuh-protocol-notes.md](wazuh-protocol-notes.md) | Research notes and source references |
 | [event-schema.md](event-schema.md) | Canonical event JSON schema |

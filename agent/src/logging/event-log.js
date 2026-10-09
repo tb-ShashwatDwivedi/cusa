@@ -26,7 +26,6 @@ export const eventLog = {
       source,
       channel: channel || undefined,
       preview: previewRaw(event.raw),
-      raw: event.raw,
       meta: {
         eventId: event.eventId,
         category: event.event?.category,

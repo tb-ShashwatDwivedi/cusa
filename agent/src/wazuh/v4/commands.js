@@ -24,6 +24,7 @@ export function parseManagerCommand(text) {
 /** @param {string} body */
 function mapWazuhCommand(body) {
   const lower = body.toLowerCase();
+  if (lower.includes('restart') && lower.includes('collector')) return 'restart_collectors';
   if (lower.includes('restart') || lower.includes('agent restart')) return 'restart_agent';
   if (lower.includes('reload') || lower.includes('config reload')) return 'reload_config';
   if (lower.includes('upgrade') || lower.includes('wpk')) return 'upgrade_agent';

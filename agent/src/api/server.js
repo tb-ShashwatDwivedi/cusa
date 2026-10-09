@@ -2,6 +2,7 @@ import Fastify from 'fastify';
 import { eventLog } from '../logging/event-log.js';
 import { hasValidToken } from '../security/api-token.js';
 import { redactEnrollment } from '../wazuh/enrollment-defaults.js';
+import { memorySnapshot } from '../core/memory.js';
 
 // GUI dev (Vite/Tauri) runs on a different origin than the local API.
 // Tauri 2 production uses http(s)://tauri.localhost (and *.localhost on Windows).
@@ -34,7 +35,7 @@ export function allowLocalCors(app) {
 
 /** @param {import('../core/agent.js').Agent} agent */
 export async function createApiServer(agent) {
-  const app = Fastify({ logger: false });
+  const app = Fastify({ logger: false, bodyLimit: 256 * 1024 });
   allowLocalCors(app);
   const host = agent.config.api?.host || '127.0.0.1';
   const port = agent.config.api?.port ?? 8710;
@@ -104,10 +105,11 @@ export async function createApiServer(agent) {
   });
   app.get('/api/logs', async (req) => {
     const { category, limit, since, search } = req.query;
+    const capped = Math.min(Math.max(Number(limit) || 200, 1), 500);
     return {
       logs: eventLog.query({
         category: category || undefined,
-        limit: limit ? Number(limit) : 200,
+        limit: capped,
         since: since || undefined,
         search: search || undefined,
       }),
@@ -118,23 +120,38 @@ export async function createApiServer(agent) {
     if (!entry) return reply.code(404).send({ error: 'not found' });
     return entry;
   });
-  app.get('/api/fim', async () => ({
-    paths: agent.config.fim?.paths || [],
-    baseline: agent.state.data.fimBaseline || {},
-    count: Object.keys(agent.state.data.fimBaseline || {}).length,
-  }));
+  app.get('/api/fim', async (req) => {
+    const baseline = agent.state.data.fimBaseline || {};
+    const keys = Object.keys(baseline);
+    const limit = Math.min(Math.max(Number(req.query.limit) || 100, 1), 500);
+    const slice = {};
+    for (const k of keys.slice(0, limit)) slice[k] = baseline[k];
+    return {
+      paths: agent.config.fim?.paths || [],
+      count: keys.length,
+      baseline: slice,
+      truncated: keys.length > limit,
+    };
+  });
   app.get('/api/compliance', async () => ({
     policyPath: agent.config.compliance?.policyPath,
     lastRun: agent.state.data.lastCompliance || null,
     results: agent.lastComplianceResults || agent.state.data.lastCompliance?.results || [],
   }));
-  app.get('/api/diagnostics', async () => ({
-    status: agent.getStatus(),
-    health: await agent.health.check(),
-    node: process.version,
-    platform: process.platform,
-    pid: process.pid,
-  }));
+  app.get('/api/diagnostics', async () => {
+    const mem = memorySnapshot();
+    return {
+      status: agent.getStatus(),
+      health: await agent.health.check(),
+      queue: agent.queue.queueStats(),
+      node: process.version,
+      platform: process.platform,
+      pid: process.pid,
+      memory: mem.memory,
+      uptime_sec: mem.uptime_sec,
+      handles: mem.handles,
+    };
+  });
 
   app.get('/api/service', async () => ({
     ...(await agent.getServiceState()),

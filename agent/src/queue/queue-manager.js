@@ -13,8 +13,11 @@ export class QueueManager {
     this.commands = new DurableQueue(queueRoot, 'commands', qOpts);
     this.results = new DurableQueue(queueRoot, 'command-results', qOpts);
     this.flushIntervalMs = config.flushIntervalMs || 1000;
+    this.batchSize = config.batchSize || 50;
+    this.backlogFlushIntervalMs = config.backlogFlushIntervalMs || this.flushIntervalMs;
     this.maxRetries = config.maxRetries || 10;
     this.running = false;
+    this.flushTimers = [];
   }
 
   async init() {
@@ -46,13 +49,30 @@ export class QueueManager {
     return this.events.depth() + this.state.depth() + this.commands.depth();
   }
 
+  queueStats() {
+    return {
+      events: this.events.stats(),
+      state: this.state.stats(),
+      commands: this.commands.stats(),
+      results: this.results.stats(),
+      totalDepth: this.totalDepth(),
+    };
+  }
+
   /** @param {import('../wazuh/client.js').WazuhClient} wazuh @param {import('../core/metrics.js').Metrics} metrics */
   startFlusher(wazuh, metrics) {
     this.running = true;
+    const schedule = (fn, delay) => {
+      const t = setTimeout(fn, delay);
+      t.unref?.();
+      this.flushTimers.push(t);
+      return t;
+    };
+
     const flushEvents = async () => {
       if (!this.running) return;
       const batch = [];
-      for (let i = 0; i < 50; i++) {
+      for (let i = 0; i < this.batchSize; i++) {
         const item = await this.events.dequeue();
         if (!item) break;
         batch.push(item);
@@ -65,8 +85,10 @@ export class QueueManager {
           for (const item of batch) await this.events.requeue(item.id);
         }
       }
+      batch.length = 0;
       metrics.set('queueDepth', this.totalDepth());
-      setTimeout(flushEvents, this.flushIntervalMs);
+      metrics.set('queueDropped', this.totalDropped());
+      schedule(flushEvents, this.flushIntervalMs);
     };
 
     const flushState = async () => {
@@ -85,7 +107,8 @@ export class QueueManager {
           for (const item of items) await this.state.requeue(item.id);
         }
       }
-      setTimeout(flushState, this.flushIntervalMs * 2);
+      items.length = 0;
+      schedule(flushState, this.flushIntervalMs * 2);
     };
 
     const flushResults = async () => {
@@ -99,7 +122,7 @@ export class QueueManager {
           await this.results.requeue(item.id);
         }
       }
-      setTimeout(flushResults, this.flushIntervalMs);
+      schedule(flushResults, this.flushIntervalMs);
     };
 
     flushEvents();
@@ -107,8 +130,19 @@ export class QueueManager {
     flushResults();
   }
 
+  totalDropped() {
+    return (
+      this.events.dropped
+      + this.state.dropped
+      + this.commands.dropped
+      + this.results.dropped
+    );
+  }
+
   stop() {
     this.running = false;
+    for (const t of this.flushTimers) clearTimeout(t);
+    this.flushTimers = [];
   }
 
   /** Wipe all queued items (does not affect Wazuh counters on manager). */
@@ -124,10 +158,12 @@ export class QueueManager {
   /** Best-effort flush before shutdown. @param {import('../wazuh/client.js').WazuhClient} wazuh @param {number} [timeoutMs] */
   async drain(wazuh, timeoutMs = 15000) {
     this.running = false;
+    for (const t of this.flushTimers) clearTimeout(t);
+    this.flushTimers = [];
     const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline && this.totalDepth() > 0) {
       const batch = [];
-      for (let i = 0; i < 50; i++) {
+      for (let i = 0; i < this.batchSize; i++) {
         const item = await this.events.dequeue();
         if (!item) break;
         batch.push(item);
@@ -141,6 +177,7 @@ export class QueueManager {
           break;
         }
       }
+      batch.length = 0;
       await new Promise((r) => setTimeout(r, 200));
     }
   }

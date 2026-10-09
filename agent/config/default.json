@@ -22,7 +22,7 @@
     }
   },
   "queue": {
-    "memoryLimit": 10000,
+    "memoryLimit": 500,
     "diskLimitMb": 256,
     "flushIntervalMs": 1000,
     "maxRetries": 10
@@ -52,6 +52,18 @@
   },
   "inventory": {
     "intervalMs": 3600000
+  },
+  "filters": {
+    "defaultAction": "include",
+    "filters": []
+  },
+  "activeResponse": {
+    "scripts": {},
+    "protectedPids": []
+  },
+  "updater": {
+    "product": "cusa-agent",
+    "publicKeyPem": null
   },
   "locked": ["collectors.sysmon"]
 }

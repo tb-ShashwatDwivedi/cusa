@@ -1,4 +1,5 @@
 import os from 'node:os';
+import { memorySnapshot, eventLoopSnapshot } from './memory.js';
 
 export class Metrics {
   constructor() {
@@ -7,6 +8,7 @@ export class Metrics {
       eventsSent: 0,
       eventsFailed: 0,
       queueDepth: 0,
+      queueDropped: 0,
       commandsReceived: 0,
       commandsExecuted: 0,
     };
@@ -29,13 +31,18 @@ export class Metrics {
   }
 
   snapshot() {
-    const mem = process.memoryUsage();
+    const mem = memorySnapshot();
+    const elu = eventLoopSnapshot();
     return {
       ...this.counters,
       eventsPerSec: this.eventsPerSec(),
       uptimeSec: Math.floor((Date.now() - this.startedAt) / 1000),
+      processUptimeSec: mem.uptime_sec,
       transportConnected: this.transportConnected,
-      memoryMb: Math.round(mem.rss / 1024 / 1024),
+      memoryMb: mem.memory.rss_mb,
+      memory: mem.memory,
+      handles: mem.handles,
+      eventLoop: elu,
       cpuCount: os.cpus().length,
       loadAvg: os.loadavg(),
       lastEventAt: this.lastEventAt,

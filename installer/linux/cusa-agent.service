@@ -1,0 +1,16 @@
+[Unit]
+Description=CyberSIO Unified Security Agent
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/node /opt/cusa/agent/src/bootstrap/main.js
+Environment=CUSA_CONFIG=/etc/cusa/config.json
+Restart=on-failure
+RestartSec=5
+User=cusa
+Group=cusa
+
+[Install]
+WantedBy=multi-user.target

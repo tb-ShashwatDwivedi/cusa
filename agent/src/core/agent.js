@@ -32,8 +32,25 @@ import { initSecretsEncryption } from '../security/secrets.js';
 import { ensureApiToken } from '../security/api-token.js';
 import { clearIdentity } from '../wazuh/v4/enrollment.js';
 import { shutdownFileLogging } from '../logging/logger.js';
+import { startMemorySampler, memorySnapshot } from './memory.js';
+import { JobGate } from './job-gate.js';
+import { join } from 'node:path';
 
-export const AGENT_VERSION = '1.0.0';
+import { AGENT_VERSION } from './version.js';
+import { enrichEvent } from '../pipeline/enrich.js';
+import { applyEventFilters } from '../pipeline/filter.js';
+import { endpointIdentity } from '../identity/endpoint-identity.js';
+import { ResponseAuditLog } from '../active-response/audit-log.js';
+import { runRootkitScan } from '../security/rootkit-scan.js';
+import {
+  loadManagerAgentConf,
+  mergeManagerPatch,
+  hashConfig,
+  assertConfigValid,
+} from '../wazuh/v4/central-config.js';
+import { validateAgentConfig } from '../config/validate-config.js';
+
+export { AGENT_VERSION };
 
 export class Agent {
   /** @param {object} config @param {import('pino').Logger} logger */
@@ -62,18 +79,25 @@ export class Agent {
     this.registry = null;
     this.compliance = new ComplianceEngine(config.compliance || {});
     this.executor = new ActiveResponseExecutor({
+      scripts: config.activeResponse?.scripts || {},
+      protectedPids: config.activeResponse?.protectedPids || [],
       onRestart: () => process.exit(0),
       onReload: async () => this.reloadConfig(),
+      onRestartCollectors: async () => this.restartCollectors(),
     });
+    this.responseAudit = new ResponseAuditLog(this.paths.cache);
     // ponytail: state.json mutates every poll/sync — watching it floods Wazuh with 1:agent: noise.
-    const tamperPaths = [process.execPath, this.paths.secrets];
+    const tamperPaths = [process.execPath, this.paths.secrets, this.paths.configLocal];
     this.tamper = new TamperDetector({
       paths: tamperPaths,
+      trustFile: join(this.paths.cache, 'tamper-trust.json'),
       onTamper: (a) => this.handleTamper(a),
     });
     this.updater = new Updater({
       dataDir: this.paths.updates,
       currentVersion: AGENT_VERSION,
+      publicKeyPem: config.updater?.publicKeyPem,
+      product: config.updater?.product,
       onApply: async () => {
         this.tamper.setUpdateInProgress(false);
         eventLog.agent('Update staged; restart required to apply', {}, 'warn');
@@ -83,10 +107,18 @@ export class Agent {
     this.apiToken = null;
     this.running = false;
     this.lastComplianceResults = [];
+    this.heavyJobs = new JobGate();
+    this.memorySampler = null;
+    this.wazuhCommandHandler = null;
   }
 
   async start() {
+    const cfgCheck = validateAgentConfig(this.config);
+    if (!cfgCheck.valid) {
+      this.logger.warn({ errors: cfgCheck.errors }, 'Config validation warnings');
+    }
     await initSecretsEncryption(this.paths.cache);
+    await this.responseAudit.init();
     this.apiToken = await ensureApiToken(this.paths.cache);
     await this.state.load();
     await this.queue.init();
@@ -100,9 +132,23 @@ export class Agent {
       if (isCollectorEnabled(this.config.collectors, c.name)) await c.start();
     }
 
+    // if (this.config.fim?.paths?.length) {
+    //   this.fim = new FimWatcher(this.config.fim, this.state);
+    //   this.fim.setHandler((item) => this.queue.enqueueState(item));
+    //   await this.fim.start();
+    // }
+
     if (this.config.fim?.paths?.length) {
-      this.fim = new FimWatcher(this.config.fim, this.state);
-      this.fim.setHandler((item) => this.queue.enqueueState(item));
+      this.fim = new FimWatcher(
+        this.config.fim,
+        this.state,
+        this.logger
+      );
+    
+      this.fim.setHandler((item) =>
+        this.queue.enqueueState(item)
+      );
+    
       await this.fim.start();
     }
 
@@ -117,11 +163,24 @@ export class Agent {
     this.health.setQueue('ok', this.queue.totalDepth());
     await this.tamper.init();
 
-    this.scheduler.schedule('inventory', this.config.inventory?.intervalMs || 3600000, () => this.syncInventory());
-    this.scheduler.schedule('compliance', this.config.compliance?.intervalMs || 86400000, () => this.runCompliance());
+    this.scheduler.schedule('inventory', this.config.inventory?.intervalMs || 3600000, () =>
+      this.heavyJobs.run(() => this.syncInventory()),
+    );
+    this.scheduler.schedule('compliance', this.config.compliance?.intervalMs || 86400000, () =>
+      this.heavyJobs.run(() => this.runCompliance()),
+    );
     this.scheduler.schedule('tamper', 60000, () => this.tamper.check());
+    this.scheduler.schedule('manager-config', 300000, () => this.syncManagerConfig());
+    this.scheduler.schedule('rootkit-scan', 86400000, () =>
+      this.heavyJobs.run(() => this.runRootkitScan()),
+    );
+    await this.syncManagerConfig();
+    await this.heavyJobs.run(() => this.syncInventory());
 
     this.api = await createApiServer(this);
+    this.memorySampler = startMemorySampler(this.logger, {
+      warnRssMb: this.config.diagnostics?.memoryWarnRssMb ?? 200,
+    });
     this.running = true;
     const mgr = this.config.wazuh.manager?.address;
     eventLog.agent('Agent running', {
@@ -133,21 +192,23 @@ export class Agent {
   }
 
   registerWazuhHandlers() {
-    this.wazuh.onCommand?.(async (parsed) => {
+    this.wazuhCommandHandler = async (parsed) => {
       if (parsed.taskId && this.state.hasTaskId(parsed.taskId)) return;
       await this.queue.enqueueCommand({ parsed, receivedAt: Date.now() });
       this.metrics.inc('commandsReceived');
       await this.processCommands();
-    });
+    };
+    this.wazuh.onCommand?.(this.wazuhCommandHandler);
   }
 
   async ingestEvent(partial) {
     try {
-      const event = validateEvent(
-        normalizeEvent(partial, {
-          agentId: this.state.data.enrollment?.agentId || this.wazuh.adapter?.identity?.id,
-        }),
-      );
+      const agentId = this.state.data.enrollment?.agentId || this.wazuh.adapter?.identity?.id;
+      let event = normalizeEvent(partial, { agentId });
+      event = enrichEvent(event, agentId);
+      const { allow } = applyEventFilters(event, this.config.filters || {});
+      if (!allow) return;
+      event = validateEvent(event);
       this.metrics.inc('eventsCollected');
       this.metrics.lastEventAt = new Date().toISOString();
       eventLog.collected(event);
@@ -180,7 +241,10 @@ export class Agent {
         index: 'wazuh-states-sca',
         operation: 'update',
         timestamp: r.timestamp,
-        data: r,
+        data: {
+          ...r,
+          agent_id: this.wazuh.adapter?.identity?.id || this.state.data.enrollment?.agentId,
+        },
       });
       await this.ingestEvent({
         source: { platform: process.platform === 'win32' ? 'windows' : 'linux', collector: 'compliance' },
@@ -193,6 +257,7 @@ export class Agent {
   async processCommands() {
     const item = await this.queue.commands.dequeue();
     if (!item) return;
+    const started = Date.now();
     try {
       const parsed = item.payload.parsed || this.parseCommand(item.payload.raw);
       if (parsed.taskId) this.state.rememberTaskId(parsed.taskId);
@@ -201,6 +266,18 @@ export class Agent {
         await this.updater.applyUpdate(parsed.manifest);
       }
       const result = await this.executor.execute(parsed);
+      const agentId = this.wazuh.adapter?.identity?.id || this.state.data.enrollment?.agentId;
+      await this.responseAudit.write({
+        task_id: parsed.taskId,
+        agent_id: agentId,
+        action: parsed.action,
+        request_timestamp: item.payload.receivedAt,
+        execution_start: new Date(started).toISOString(),
+        execution_end: new Date().toISOString(),
+        status: result.status || (result.success ? 'completed' : 'failed'),
+        sanitized_parameters: { pid: parsed.pid, ip: parsed.ip, scriptId: parsed.scriptId },
+        result,
+      });
       await this.queue.enqueueCommandResult({ ...result, counter: parsed.counter, taskId: parsed.taskId });
       await this.queue.commands.ack(item.id);
       this.metrics.inc('commandsExecuted');
@@ -224,6 +301,59 @@ export class Agent {
   async handleTamper(alert) {
     eventLog.agent('Tamper detection', alert, 'warn');
     this.logger.warn({ alert }, 'Tamper detection');
+    await this.ingestEvent({
+      source: { platform: process.platform === 'win32' ? 'windows' : 'linux', collector: 'tamper' },
+      event: { category: 'threat', type: 'tamper', action: alert.type, severity: 'high' },
+      raw: JSON.stringify(alert),
+    });
+  }
+
+  async restartCollectors() {
+    for (const c of this.collectors) await c.stop();
+    for (const c of this.collectors) {
+      if (isCollectorEnabled(this.config.collectors, c.name)) await c.start();
+    }
+    eventLog.agent('Collectors restarted');
+  }
+
+  async syncManagerConfig() {
+    const loaded = await loadManagerAgentConf(this.config.agent.dataDir);
+    if (!loaded?.patch) {
+      this.health.setComponent?.('configuration', 'NOT_CONFIGURED');
+      return;
+    }
+    const nextHash = hashConfig(loaded.patch);
+    if (this.state.data.managerConfigHash === nextHash) return;
+    try {
+      const merged = mergeManagerPatch(this.config, loaded.patch, this.config.locked || []);
+      assertConfigValid(merged);
+      this.state.data.lastKnownGoodConfig = this.config;
+      this.state.data.managerConfigHash = nextHash;
+      this.state.data.configVersion = (this.state.data.configVersion || 0) + 1;
+      await saveLocalConfig(
+        applyPatch(await loadLocalOverlay(this.paths.configLocal), loaded.patch, this.config.locked || []),
+        this.config.agent.dataDir,
+      );
+      await this.reloadConfig();
+      this.health.setComponent?.('configuration', 'HEALTHY');
+    } catch (err) {
+      this.logger.warn({ err }, 'Manager config rejected');
+      this.health.setComponent?.('configuration', 'DEGRADED');
+      eventLog.agent('Manager configuration rejected', { error: err.message }, 'warn');
+    }
+  }
+
+  async runRootkitScan() {
+    const scan = await runRootkitScan();
+    this.state.data.lastRootkitScan = { at: new Date().toISOString(), ...scan };
+    await this.state.save();
+    if (scan.status === 'FAIL' || scan.status === 'WARN') {
+      await this.ingestEvent({
+        source: { platform: process.platform === 'win32' ? 'windows' : 'linux', collector: 'rootkit-scan' },
+        event: { category: 'threat', type: 'anomaly', action: scan.status, severity: scan.status === 'FAIL' ? 'high' : 'medium' },
+        raw: JSON.stringify(scan.findings.slice(0, 20)),
+      });
+    }
   }
 
   /** @param {object} patch nested partial config update */
@@ -256,11 +386,26 @@ export class Agent {
     }
     this.config = config;
     for (const c of this.collectors) await c.stop();
+    this.fim?.stop();
+    this.fim = null;
+    this.registry?.stop();
+    this.registry = null;
+    this.health.clearCollectors();
     this.collectors = createCollectors(this.config, this.state);
     for (const c of this.collectors) {
       c.setEventHandler((partial) => this.ingestEvent(partial));
       this.health.registerCollector(c.name, () => c.health());
       if (isCollectorEnabled(this.config.collectors, c.name)) await c.start();
+    }
+    if (this.config.fim?.paths?.length) {
+      this.fim = new FimWatcher(this.config.fim, this.state);
+      this.fim.setHandler((item) => this.queue.enqueueState(item));
+      await this.fim.start();
+    }
+    if (this.config.registry?.keys?.length && process.platform === 'win32') {
+      this.registry = new RegistryWatcher(this.config.registry, this.state);
+      this.registry.setHandler((item) => this.queue.enqueueState(item));
+      await this.registry.start();
     }
     await this.compliance.load();
     this.wazuh.options.manager = this.config.wazuh.manager;
@@ -331,6 +476,8 @@ export class Agent {
 
   async stop() {
     this.running = false;
+    this.memorySampler?.stop();
+    this.memorySampler = null;
     this.scheduler.stopAll();
     for (const c of this.collectors) await c.stop();
     this.fim?.stop();
