@@ -36,6 +36,7 @@ export class WazuhClient {
       manager: this.options.manager,
       enrollment: this.options.enrollment,
       dataDir: this.options.dataDir,
+      managerDir: this.options.managerDir,
       agentName: this.options.agentName,
       state: this.options.state,
       metrics: this.options.metrics,
@@ -81,6 +82,11 @@ export class WazuhClient {
   /** @param {(cmd: object) => void} handler */
   onCommand(handler) {
     return this.adapter?.onCommand(handler);
+  }
+
+  /** @param {(name: string) => void} handler fired when the manager pushes shared config */
+  onManagerFile(handler) {
+    return this.adapter?.onManagerFile?.(handler);
   }
 
   async close() {

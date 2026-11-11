@@ -6,7 +6,7 @@
   "wazuh": {
     "version": "4.11",
     "manager": {
-      "address": null, 
+      "address": null,
       "port": 1514,
       "enrollmentPort": 1515,
       "protocol": "tcp"
@@ -16,7 +16,7 @@
       "apiUser": "wazuh-wui",
       "apiPassword": "wazuh-wui",
       "apiPort": 55000,
-      "insecure": true,
+      "insecure": false,
       "groups": ["default"],
       "caCert": null
     }
@@ -51,10 +51,23 @@
     "powershell": { "enabled": false, "intervalMs": 60000, "maxEventsPerPoll": 10, "tailFromNow": true },
     "journald": { "enabled": true, "intervalMs": 15000 },
     "syslog": { "enabled": true },
-    "fileTail": { "enabled": false, "paths": [] }
+    "fileTail": { "enabled": false, "intervalMs": 2000, "paths": [] }
   },
   "fim": {
-    "paths": []
+    "paths": [],
+    "native": false,
+    "maxBaselineFiles": 300,
+    "maxDepth": 3,
+    "intervalMs": 0,
+    "excludePaths": []
+  },
+  "registry": {
+    "keys": [],
+    "intervalMs": 60000
+  },
+  "rootkit": {
+    "enabled": true,
+    "intervalMs": 86400000
   },
   "compliance": {
     "policyPath": null,
@@ -64,17 +77,31 @@
     "intervalMs": 3600000,
     "maxItemsPerCategory": 2000
   },
+  "vulnerability": {
+    "enabled": false,
+    "feedPath": null,
+    "intervalMs": 21600000
+  },
   "filters": {
     "defaultAction": "include",
     "filters": []
   },
   "activeResponse": {
+    "enabled": true,
     "scripts": {},
-    "protectedPids": []
+    "protectedPids": [],
+    "commandMap": {}
+  },
+  "tamper": {
+    "enabled": true,
+    "intervalMs": 60000,
+    "paths": [],
+    "alertOnce": true
   },
   "updater": {
     "product": "cusa-agent",
-    "publicKeyPem": null
+    "publicKeyPem": null,
+    "requireSignature": true
   },
   "locked": []
 }

@@ -11,6 +11,11 @@ export class TamperDetector {
     this.baseline = new Map();
     this.updateInProgress = false;
     this.onTamper = opts.onTamper;
+    this.enabled = opts.enabled !== false;
+    // Alert once per changed path and hold the last-known-good baseline, rather than
+    // re-alerting every cycle or silently rewriting the baseline on change. CYB-6107.
+    this.alertOnce = opts.alertOnce !== false;
+    this.alerted = new Set();
   }
 
   setUpdateInProgress(v) {
@@ -67,23 +72,43 @@ export class TamperDetector {
   }
 
   async check() {
-    if (this.updateInProgress) return [];
+    if (!this.enabled || this.updateInProgress) return [];
     const alerts = [];
     for (const [path, prev] of this.baseline) {
       try {
         const st = await stat(path);
         const hash = st.isFile() ? await this.hashFile(path) : null;
-        if (hash !== prev.hash || st.mtimeMs !== prev.mtime) {
-          const alert = { path, type: 'modification' };
-          alerts.push(alert);
-          this.onTamper?.(alert);
+        const changed = hash !== prev.hash || st.mtimeMs !== prev.mtime;
+        if (changed) {
+          // Baseline is last-known-good and is NOT mutated here, so the alert reflects
+          // the original trusted state until an operator re-trusts (trust()/init).
+          if (!this.alertOnce || !this.alerted.has(path)) {
+            const alert = { path, type: 'modification' };
+            alerts.push(alert);
+            this.alerted.add(path);
+            this.onTamper?.(alert);
+          }
+        } else {
+          // Reverted to known-good — re-arm so a future change alerts again.
+          this.alerted.delete(path);
         }
       } catch {
-        const alert = { path, type: 'missing' };
-        alerts.push(alert);
-        this.onTamper?.(alert);
+        if (!this.alertOnce || !this.alerted.has(path)) {
+          const alert = { path, type: 'missing' };
+          alerts.push(alert);
+          this.alerted.add(path);
+          this.onTamper?.(alert);
+        }
       }
     }
     return alerts;
+  }
+
+  /** Explicitly re-trust the current on-disk state (e.g. after an authorized update). */
+  async trust() {
+    this.baseline.clear();
+    this.alerted.clear();
+    for (const p of this.paths) await this.record(p);
+    await this.persistTrustStore();
   }
 }

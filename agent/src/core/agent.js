@@ -11,7 +11,7 @@ import { InventoryScanner } from '../inventory/scanner.js';
 import { computeDelta } from '../inventory/delta.js';
 import { UNSUPPORTED_WIRE_CATEGORIES } from '../inventory/wazuh-collectors.js';
 import { FimWatcher } from '../fim/watcher.js';
-import { fimItemToIngestEvent, registryItemToIngestEvent } from '../fim/wire-event.js';
+import { fimItemToIngestEvent, fimItemToSyscheckEvent, registryItemToIngestEvent } from '../fim/wire-event.js';
 import { RegistryWatcher } from '../registry/watcher.js';
 import { ComplianceEngine } from '../compliance/engine.js';
 import { ActiveResponseExecutor } from '../active-response/executor.js';
@@ -36,7 +36,7 @@ import { clearIdentity } from '../wazuh/v4/enrollment.js';
 import { shutdownFileLogging } from '../logging/logger.js';
 import { startMemorySampler, memorySnapshot } from './memory.js';
 import { JobGate } from './job-gate.js';
-import { join } from 'node:path';
+import { join, dirname } from 'node:path';
 
 import { AGENT_VERSION } from './version.js';
 import { enrichEvent } from '../pipeline/enrich.js';
@@ -44,6 +44,7 @@ import { applyEventFilters } from '../pipeline/filter.js';
 import { endpointIdentity } from '../identity/endpoint-identity.js';
 import { ResponseAuditLog } from '../active-response/audit-log.js';
 import { runRootkitScan } from '../security/rootkit-scan.js';
+import { correlateVulnerabilities, loadCveFeed } from '../inventory/vuln-input.js';
 import {
   loadManagerAgentConf,
   mergeManagerPatch,
@@ -73,6 +74,7 @@ export class Agent {
       manager: config.wazuh.manager,
       enrollment: config.wazuh.enrollment,
       dataDir: this.paths.secrets,
+      managerDir: this.paths.managerDir,
       agentName: config.agent.name,
       state: this.state,
       metrics: this.metrics,
@@ -86,6 +88,7 @@ export class Agent {
     this.compliance = new ComplianceEngine(config.compliance || {});
     this.executor = new ActiveResponseExecutor({
       scripts: config.activeResponse?.scripts || {},
+      enabled: config.activeResponse?.enabled !== false,
       protectedPids: config.activeResponse?.protectedPids || [],
       onRestart: () => process.exit(0),
       onReload: async () => this.reloadConfig(),
@@ -93,9 +96,22 @@ export class Agent {
     });
     this.responseAudit = new ResponseAuditLog(this.paths.cache);
     // ponytail: state.json mutates every poll/sync — watching it floods Wazuh with 1:agent: noise.
-    const tamperPaths = [process.execPath, this.paths.secrets, this.paths.configLocal];
+    // Broadened beyond the binary/secrets/config trio to cover the install dir, deploy manifest,
+    // and operator-supplied paths (tamper.paths). CYB-6107.
+    const tamperPaths = [
+      process.execPath,
+      dirname(process.execPath),
+      this.paths.secrets,
+      this.paths.configLocal,
+      this.paths.configDir,
+      this.paths.deploy,
+      this.paths.installMarker,
+      ...(config.tamper?.paths || []),
+    ];
     this.tamper = new TamperDetector({
-      paths: tamperPaths,
+      paths: [...new Set(tamperPaths)],
+      enabled: config.tamper?.enabled !== false,
+      alertOnce: config.tamper?.alertOnce !== false,
       trustFile: join(this.paths.cache, 'tamper-trust.json'),
       onTamper: (a) => this.handleTamper(a),
     });
@@ -104,8 +120,11 @@ export class Agent {
       currentVersion: AGENT_VERSION,
       publicKeyPem: config.updater?.publicKeyPem,
       product: config.updater?.product,
+      requireSignature: config.updater?.requireSignature !== false,
       onApply: async () => {
         this.tamper.setUpdateInProgress(false);
+        // Re-trust the new binary so broadened tamper detection re-arms post-upgrade.
+        await this.tamper.trust?.();
         eventLog.agent('Update staged; restart required to apply', {}, 'warn');
       },
     });
@@ -152,7 +171,8 @@ export class Agent {
         this.state,
         this.logger,
       );
-      this.fim.setHandler((item) => { void this.ingestEvent(fimItemToIngestEvent(item)); });
+      const toEvent = this.config.fim?.native ? fimItemToSyscheckEvent : fimItemToIngestEvent;
+      this.fim.setHandler((item) => { void this.ingestEvent(toEvent(item)); });
     }
 
     if (this.config.registry?.keys?.length && process.platform === 'win32') {
@@ -177,11 +197,18 @@ export class Agent {
     this.scheduler.schedule('compliance', this.config.compliance?.intervalMs || 86400000, () =>
       this.heavyJobs.run(() => this.runCompliance()),
     );
-    this.scheduler.schedule('tamper', 60000, () => this.tamper.check());
+    this.scheduler.schedule('tamper', this.config.tamper?.intervalMs || 60000, () => this.tamper.check());
     this.scheduler.schedule('manager-config', 300000, () => this.syncManagerConfig());
-    this.scheduler.schedule('rootkit-scan', 86400000, () =>
-      this.heavyJobs.run(() => this.runRootkitScan()),
-    );
+    if (this.config.rootkit?.enabled !== false) {
+      this.scheduler.schedule('rootkit-scan', this.config.rootkit?.intervalMs || 86400000, () =>
+        this.heavyJobs.run(() => this.runRootkitScan()),
+      );
+    }
+    if (this.config.vulnerability?.enabled && this.config.vulnerability?.feedPath) {
+      this.scheduler.schedule('vulnerability', this.config.vulnerability?.intervalMs || 21600000, () =>
+        this.heavyJobs.run(() => this.runVulnerabilityScan()),
+      );
+    }
     void this.syncManagerConfig();
     void this.heavyJobs.run(() => this.syncInventory());
 
@@ -205,6 +232,10 @@ export class Agent {
       await this.processCommands();
     };
     this.wazuh.onCommand?.(this.wazuhCommandHandler);
+    // Re-sync config the moment the manager pushes a new merged.mg / agent.conf. CYB-6085.
+    this.wazuh.onManagerFile?.(() => {
+      void this.syncManagerConfig();
+    });
   }
 
   async startCollectorsStaggered() {
@@ -388,7 +419,7 @@ export class Agent {
   }
 
   async syncManagerConfig() {
-    const loaded = await loadManagerAgentConf(this.config.agent.dataDir);
+    const loaded = await loadManagerAgentConf(this.paths.managerDir);
     if (!loaded?.patch) {
       this.health.setComponent?.('configuration', 'NOT_CONFIGURED');
       return;
@@ -424,6 +455,35 @@ export class Agent {
         event: { category: 'threat', type: 'anomaly', action: scan.status, severity: scan.status === 'FAIL' ? 'high' : 'medium' },
         raw: JSON.stringify(scan.findings.slice(0, 20)),
       });
+    }
+  }
+
+  /** Optional on-box CVE correlation against a local feed (#24). */
+  async runVulnerabilityScan() {
+    try {
+      const feed = await loadCveFeed(this.config.vulnerability.feedPath);
+      const packages = (this.state.data.lastInventory || []).filter((i) => i.category === 'packages');
+      const findings = correlateVulnerabilities(
+        packages.map((p) => ({ name: p.data?.name, version: p.data?.version })),
+        feed,
+      );
+      this.state.data.lastVulnerability = { at: new Date().toISOString(), count: findings.length };
+      await this.state.save();
+      for (const f of findings) {
+        await this.ingestEvent({
+          source: { platform: process.platform === 'win32' ? 'windows' : 'linux', collector: 'vulnerability' },
+          event: {
+            category: 'vulnerability',
+            type: 'info',
+            action: 'detected',
+            severity: f.severity === 'critical' || f.severity === 'high' ? 'high' : 'medium',
+          },
+          raw: JSON.stringify({ source: 'cusa_vuln', ...f }),
+        });
+      }
+      eventLog.agent('Vulnerability correlation complete', { findings: findings.length });
+    } catch (err) {
+      this.logger.warn({ err }, 'Vulnerability scan failed');
     }
   }
 
@@ -472,8 +532,10 @@ export class Agent {
       this.fim = new FimWatcher(
         { ...this.config.fim, agentDataDir: this.config.agent?.dataDir || this.paths?.data },
         this.state,
+        this.logger,
       );
-      this.fim.setHandler((item) => { void this.ingestEvent(fimItemToIngestEvent(item)); });
+      const toEvent = this.config.fim?.native ? fimItemToSyscheckEvent : fimItemToIngestEvent;
+      this.fim.setHandler((item) => { void this.ingestEvent(toEvent(item)); });
       await this.fim.start();
     }
     if (this.config.registry?.keys?.length && process.platform === 'win32') {
@@ -539,9 +601,32 @@ export class Agent {
     };
   }
 
-  /** @param {{ includeLogs?: boolean }} [opts] */
+  /** @param {{ includeLogs?: boolean, deregister?: boolean }} [opts] */
   async decommission(opts = {}) {
     eventLog.agent('Decommission purge started', {}, 'warn');
+    // Best-effort manager-side deregister so the agent identity is removed from the
+    // manager key store, not just wiped locally. #34 / CYB-6092.
+    if (opts.deregister !== false) {
+      try {
+        const agentId = this.wazuh.adapter?.identity?.id || this.state.data.enrollment?.agentId;
+        const enr = this.config.wazuh?.enrollment || {};
+        const mgr = this.config.wazuh?.manager || {};
+        if (agentId && mgr.address && enr.apiUser) {
+          const { deregisterAgent } = await import('../wazuh/v4/api-enrollment.js');
+          const res = await deregisterAgent({
+            host: mgr.address,
+            apiPort: enr.apiPort || 55000,
+            user: enr.apiUser,
+            password: enr.apiPassword,
+            insecure: enr.insecure === true,
+            ca: enr.caCert || undefined,
+          }, agentId);
+          eventLog.agent('Manager deregister attempted', { agentId, ok: res.ok }, res.ok ? 'info' : 'warn');
+        }
+      } catch (err) {
+        this.logger.warn({ err }, 'Manager deregister failed (continuing with local purge)');
+      }
+    }
     await this.stop();
     const result = await purgeAgentData(this.paths, opts);
     eventLog.agent('Decommission purge complete', result, 'warn');

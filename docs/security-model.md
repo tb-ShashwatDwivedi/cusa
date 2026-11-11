@@ -291,3 +291,18 @@ If agent integrity is compromised:
 4. Operator can decommission via MSI uninstall
 
 CUSA does not implement self-destruct or remote wipe capabilities.
+
+---
+
+## Enrollment TLS defaults (2026-11-11, CYB-5300)
+
+Runtime defaults now match this document's fail-closed posture:
+
+- `wazuh.enrollment.insecure` defaults to **`false`** in `agent/config/default.json`.
+- Authd (1515) and Wazuh API (55000) enrollment both set `rejectUnauthorized` from the
+  `insecure` flag and accept a `caCert` (PEM) for pinning the manager.
+- `insecure: true` is a documented **lab-only** override, surfaced as a GUI toggle
+  ("Allow insecure TLS").
+
+Against a stock self-signed Wazuh manager, operators must supply `wazuh.enrollment.caCert`
+(or set `insecure: true` for non-production), otherwise enrollment fails closed by design.

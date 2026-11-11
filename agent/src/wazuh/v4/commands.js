@@ -24,10 +24,50 @@ export function parseManagerCommand(text) {
   }
   try {
     const json = JSON.parse(trimmed);
+    // Stock Wazuh active-response wire format (4.2+): { version, origin, command, parameters }.
+    // Previously these fell through to substring heuristics and became `unknown`. CYB-6106.
+    if (json.command && json.parameters) {
+      return { ...parseActiveResponse(json), raw: trimmed };
+    }
     const action = json.action || json.type || mapWazuhCommand(trimmed);
     return { type: 'json', action, taskId: json.taskId || json.task_id, ...json, raw: trimmed };
   } catch {
     return { type: 'raw', action: mapWazuhCommand(trimmed), raw: trimmed };
+  }
+}
+
+/**
+ * Map a stock Wazuh AR JSON command to a CUSA executor action.
+ * The command name carries a trailing 0 (add) / 1 (delete); alert data holds the target.
+ * @param {object} json
+ */
+export function parseActiveResponse(json) {
+  const rawName = String(json.command || '');
+  const add = !rawName.endsWith('1');
+  const name = rawName.replace(/[01]$/, '');
+  const params = json.parameters || {};
+  const alertData = params.alert?.data || {};
+  const ip = alertData.srcip || alertData.src_ip || alertData.dstip || params.srcip;
+  const pid = alertData.pid || alertData.process_id || params.pid;
+  const taskId = json.taskId || json.task_id || params.task_id;
+
+  const base = { type: 'ar', command: name, add, taskId, parameters: params };
+
+  switch (name) {
+    case 'firewall-drop':
+    case 'host-deny':
+    case 'npm-block':
+    case 'win_firewall':
+      return { ...base, action: 'block_ip', ip, remove: !add };
+    case 'kill-process':
+    case 'pid':
+      return { ...base, action: 'terminate_process', pid: Number(pid) };
+    case 'restart-wazuh':
+    case 'restart':
+      return { ...base, action: 'restart_agent' };
+    default:
+      // Operators register custom AR scripts under the command name (activeResponse.scripts).
+      return { ...base, action: 'approved_script', scriptId: name };
   }
 }
 

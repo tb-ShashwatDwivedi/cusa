@@ -7,10 +7,14 @@ Wants=network-online.target
 Type=simple
 ExecStart=/usr/bin/node /opt/cusa/agent/src/bootstrap/main.js
 Environment=CUSA_CONFIG=/etc/cusa/config.json
+Environment=CUSA_DATA_DIR=/var/lib/cusa
 Restart=on-failure
 RestartSec=5
 User=cusa
 Group=cusa
+NoNewPrivileges=true
+ProtectSystem=full
+ReadWritePaths=/var/lib/cusa /etc/cusa
 
 [Install]
 WantedBy=multi-user.target

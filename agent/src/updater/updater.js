@@ -13,6 +13,8 @@ export class Updater {
     this.publicKeyPem = opts.publicKeyPem || null;
     this.product = opts.product || 'cusa-agent';
     this.architecture = opts.architecture || process.arch;
+    // Secure default: reject unsigned upgrades unless explicitly disabled (lab only). #33.
+    this.requireSignature = opts.requireSignature !== false;
   }
 
   verifyManifest(manifest) {
@@ -21,6 +23,14 @@ export class Updater {
     }
     if (manifest.architecture && manifest.architecture !== this.architecture) {
       throw new Error('Wrong architecture');
+    }
+    if (this.requireSignature) {
+      if (!this.publicKeyPem) {
+        throw new Error('Signature required but no public key configured (updater.publicKeyPem)');
+      }
+      if (!manifest.signature) {
+        throw new Error('Signature required but manifest is unsigned');
+      }
     }
     if (manifest.signature && this.publicKeyPem) {
       const verify = createVerify('SHA256');

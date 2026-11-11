@@ -1,7 +1,7 @@
 import { rm, access } from 'node:fs/promises';
 import { join } from 'node:path';
 
-const PURGE_TARGETS = ['config', 'state', 'secrets', 'queue', 'cache', 'updates'];
+const PURGE_TARGETS = ['config', 'state', 'secrets', 'queue', 'cache', 'updates', 'manager'];
 
 /**
  * Remove agent identity, queues, and configuration from ProgramData.

@@ -14,19 +14,29 @@ const FIELDS = [
   { path: 'wazuh.manager.port', label: 'Manager port', type: 'number' },
   { path: 'wazuh.manager.enrollmentPort', label: 'Enrollment port (authd)', type: 'number' },
   { path: 'wazuh.version', label: 'Wazuh protocol version', type: 'text' },
-  { path: 'collectors.eventChannel.enabled', label: 'Windows event channel', type: 'boolean' },
-  { path: 'collectors.sysmon.enabled', label: 'Sysmon collector', type: 'boolean' },
-  { path: 'collectors.defender.enabled', label: 'Defender collector', type: 'boolean' },
-  { path: 'collectors.powershell.enabled', label: 'PowerShell collector', type: 'boolean' },
-  { path: 'collectors.journald.enabled', label: 'Journald collector', type: 'boolean' },
-  { path: 'collectors.syslog.enabled', label: 'Syslog collector', type: 'boolean' },
-  { path: 'collectors.auditd.enabled', label: 'Auditd collector', type: 'boolean' },
-  { path: 'queue.memoryLimit', label: 'Queue memory limit', type: 'number' },
-  { path: 'queue.diskLimitMb', label: 'Queue disk limit (MB)', type: 'number' },
-  { path: 'logging.level', label: 'Log level', type: 'select', options: ['trace', 'debug', 'info', 'warn', 'error'] },
-  { path: 'fim.paths', label: 'FIM paths (comma-separated)', type: 'paths' },
-  { path: 'compliance.policyPath', label: 'Compliance policy path', type: 'text' },
-  { path: 'api.port', label: 'Local API port', type: 'number' },
+  { path: 'wazuh.enrollment.insecure', label: 'Allow insecure TLS (lab only)', type: 'boolean' },
+  { path: 'collectors.eventChannel.enabled', label: 'Windows event channel', type: 'boolean', section: 'Collectors' },
+  { path: 'collectors.sysmon.enabled', label: 'Sysmon collector', type: 'boolean', section: 'Collectors' },
+  { path: 'collectors.defender.enabled', label: 'Defender collector', type: 'boolean', section: 'Collectors' },
+  { path: 'collectors.powershell.enabled', label: 'PowerShell collector', type: 'boolean', section: 'Collectors' },
+  { path: 'collectors.journald.enabled', label: 'Journald collector', type: 'boolean', section: 'Collectors' },
+  { path: 'collectors.syslog.enabled', label: 'Syslog collector', type: 'boolean', section: 'Collectors' },
+  { path: 'collectors.auditd.enabled', label: 'Auditd collector', type: 'boolean', section: 'Collectors' },
+  { path: 'collectors.fileTail.enabled', label: 'Custom log file monitoring', type: 'boolean', section: 'Collectors' },
+  { path: 'collectors.fileTail.paths', label: 'Custom log file paths (comma-separated)', type: 'paths', section: 'Collectors' },
+  { path: 'filters.defaultAction', label: 'Default action', type: 'select', options: ['include', 'exclude'], section: 'Log filtering' },
+  { path: 'filters.filters', label: 'Filter rules (JSON array)', type: 'json', section: 'Log filtering' },
+  { path: 'fim.paths', label: 'FIM paths (comma-separated)', type: 'paths', section: 'FIM & Registry' },
+  { path: 'fim.native', label: 'Native syscheck (queue 8)', type: 'boolean', section: 'FIM & Registry' },
+  { path: 'registry.keys', label: 'Registry keys (comma-separated)', type: 'paths', section: 'FIM & Registry' },
+  { path: 'compliance.policyPath', label: 'Compliance policy path', type: 'text', section: 'Security' },
+  { path: 'rootkit.enabled', label: 'Rootkit / suspicious system check', type: 'boolean', section: 'Security' },
+  { path: 'tamper.enabled', label: 'Tamper detection', type: 'boolean', section: 'Security' },
+  { path: 'activeResponse.enabled', label: 'Active response framework', type: 'boolean', section: 'Response' },
+  { path: 'queue.memoryLimit', label: 'Queue memory limit', type: 'number', section: 'Advanced' },
+  { path: 'queue.diskLimitMb', label: 'Queue disk limit (MB)', type: 'number', section: 'Advanced' },
+  { path: 'logging.level', label: 'Log level', type: 'select', options: ['trace', 'debug', 'info', 'warn', 'error'], section: 'Advanced' },
+  { path: 'api.port', label: 'Local API port', type: 'number', section: 'Advanced' },
 ];
 
 function getByPath(obj, path) {
@@ -52,6 +62,7 @@ function isLocked(path, locked) {
 function toDisplay(path, value, type) {
   if (type === 'secret') return '';
   if (type === 'paths') return Array.isArray(value) ? value.join(', ') : '';
+  if (type === 'json') return JSON.stringify(value ?? [], null, 2);
   if (type === 'boolean') return value === true;
   return value ?? '';
 }
@@ -64,6 +75,11 @@ function fromInput(path, raw, type) {
       .split(',')
       .map((s) => s.trim())
       .filter(Boolean);
+  }
+  if (type === 'json') {
+    const text = String(raw).trim();
+    if (!text) return [];
+    return JSON.parse(text); // invalid JSON throws → surfaced as a save error
   }
   return raw === '' ? null : raw;
 }
@@ -104,8 +120,8 @@ export default function Configuration() {
         if (field.type === 'secret' && !draft[field.path]) continue;
         const next = fromInput(field.path, draft[field.path], field.type);
         const prev = getByPath(cfg, field.path);
-        const same = field.type === 'paths'
-          ? JSON.stringify(prev || []) === JSON.stringify(next || [])
+        const same = field.type === 'paths' || field.type === 'json'
+          ? JSON.stringify(prev ?? (field.type === 'json' ? [] : [])) === JSON.stringify(next ?? [])
           : prev === next;
         if (!same) patch = setByPath(patch, field.path, next);
       }
@@ -202,6 +218,15 @@ export default function Configuration() {
                           <option key={o} value={o}>{o}</option>
                         ))}
                       </select>
+                    ) : field.type === 'json' ? (
+                      <textarea
+                        id={id}
+                        className="mono"
+                        rows={6}
+                        value={draft[field.path] ?? ''}
+                        disabled={fieldLocked}
+                        onChange={(e) => onChange(field.path, e.target.value)}
+                      />
                     ) : (
                       <input
                         id={id}

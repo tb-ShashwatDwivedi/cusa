@@ -1,10 +1,11 @@
-/** Fixed CyberSIO/Wazuh 4.11 enrollment credentials — not user-editable. */
+/** Fixed CyberSIO/Wazuh 4.11 enrollment credentials — not user-editable.
+ * NOTE: TLS policy (`insecure`/`caCert`) is deliberately NOT fixed here so the
+ * secure-by-default config and operator CA settings are honored. CYB-5300. */
 export const FIXED_ENROLLMENT = {
   password: 'wazuh-wui',
   apiUser: 'wazuh-wui',
   apiPassword: 'wazuh-wui',
   apiPort: 55000,
-  insecure: true,
 };
 
 /**

@@ -25,6 +25,45 @@ export function fimItemToIngestEvent(item) {
   };
 }
 
+/**
+ * Native Wazuh syscheck FIM event routed on queue 8 (location "syscheck"), so
+ * stock FIM rules/dashboards in tbSIEM light up instead of treating FIM as custom
+ * ingest. Enabled with `fim.native: true`. CYB-5996.
+ * @param {object} item
+ */
+export function fimItemToSyscheckEvent(item) {
+  const path = item.data?.path || '';
+  const changeType =
+    item.operation === 'delete' ? 'deleted'
+      : item.operation === 'create' ? 'added'
+        : 'modified';
+  const attributes = {
+    type: item.data?.mode === 'directory' ? 'registry_key' : 'file',
+    size: item.data?.size,
+    mtime: item.data?.mtime ? Math.floor(item.data.mtime / 1000) : undefined,
+    hash_sha256: item.data?.sha256,
+    checksum: item.data?.sha256,
+  };
+  return {
+    source: {
+      platform: process.platform === 'win32' ? 'windows' : 'linux',
+      collector: 'fim',
+      channel: 'syscheck',
+    },
+    event: { category: 'file', type: 'change', action: item.operation },
+    raw: JSON.stringify({
+      type: 'event',
+      data: {
+        path,
+        mode: 'scheduled',
+        type: changeType,
+        timestamp: Math.floor(Date.now() / 1000),
+        attributes,
+      },
+    }),
+  };
+}
+
 /** @param {object} item */
 export function registryItemToIngestEvent(item) {
   const key = item.data?.key || '';

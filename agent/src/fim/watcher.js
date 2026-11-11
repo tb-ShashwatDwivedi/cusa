@@ -94,6 +94,15 @@ export class FimWatcher {
       // Continue monitoring other configured paths.
     }
   }
+
+  // Persist the baseline immediately after the initial scan. Previously the
+  // baseline lived only in memory until the first change triggered a save, so
+  // the GUI/API reported an empty baseline on a freshly configured agent. CYB-6031.
+  try {
+    await this.state.save();
+  } catch (err) {
+    this.logger?.warn({ err }, 'Failed to persist FIM baseline');
+  }
 }
 
 

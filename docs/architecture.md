@@ -385,24 +385,28 @@ Legend:
 | **Partial** | Core capability exists; needs config, platform scope, or follow-up hardening |
 | **None** | Not implemented |
 
+> **Validation caveat (2026-11-11 rework):** rows marked `Full†` are code-complete in this
+> repo but have **not** been validated against a live Wazuh 4.11.2 manager or on a real MSI/deb/rpm
+> install in this pass. See `docs/IMPLEMENTATION-PROGRESS.md` for exactly what changed per row.
+
 | # | Feature | Priority | Status | Notes |
 |---|---------|----------|--------|-------|
-| 1 | Agent installation & service | Must | **Partial** | MSI + `CUSAAgent` + `single-instance` lock; `installer/linux/cusa-agent.service`; MSI/reboot validation is manual |
+| 1 | Agent installation & service | Must | **Full†** | MSI + `CUSAAgent` + `single-instance`; Linux deb/rpm build scripts added; reboot/CI validation still manual |
 | 2 | Agent enrollment | Must | **Full** | Authd + API enrollment, identity in secrets store |
 | 3 | Endpoint identification | Must | **Full** | `identity/endpoint-identity.js` + `pipeline/enrich.js` |
 | 4 | Agent heartbeat | Must | **Full** | `keepalive.js` over manager connection |
-| 5 | Secure agent communication | Must | **Full** | v4 AES encrypted TCP payloads |
-| 6 | Central configuration | Must | **Partial** | `wazuh/v4/central-config.js` parses `agent.conf` from `ProgramData/.../manager/`; validate + rollback; live manager push TBD |
-| 7 | Windows event log collection | Must | **Full** | Configurable channels, bookmarks |
-| 8 | Linux log collection | Must | **Full** | journald, syslog, auditd |
-| 9 | Custom log file monitoring | Must | **Partial** | `fileTail` when enabled with paths |
-| 10 | Log filtering | Must | **Full** | `pipeline/filter.js` include/exclude rules (`config.filters`) |
-| 11 | Security event collection | Must | **Full** | Security channel + auditd |
-| 12 | File integrity monitoring | Must | **Partial** | Requires `fim.paths` configuration |
-| 13 | FIM baseline | Must | **Full** | Hashes/metadata in `state.fimBaseline` |
-| 14 | Registry monitoring (Windows) | Must | **Partial** | Requires `registry.keys` configuration |
-| 15 | Rootkit / suspicious system check | Should | **Full** | `security/rootkit-scan.js` scheduled; PASS/WARN/FAIL |
-| 16 | Security configuration assessment | Must | **Full** | Policy hash/version + deltas when `compliance.policyPath` set |
+| 5 | Secure agent communication | Must | **Full†** | Secure-by-default: `enrollment.insecure:false`, authd+API TLS verification, CA support (CYB-5300) |
+| 6 | Central configuration | Must | **Full†** | Remoted shared-file push (`#!-up file`/`merged.mg`) implemented; keepalive advertises real merged md5; unified `manager/` dir; auto re-sync on push (CYB-6085) |
+| 7 | Windows event log collection | Must | **Full** | Configurable channels (default Security/System/Application), bookmarks; Sysmon/Defender/PS opt-in |
+| 8 | Linux log collection | Must | **Full†** | journald, syslog, auditd + `build-deb.sh`/`build-rpm.sh` + hardened systemd unit (CYB-6109) |
+| 9 | Custom log file monitoring | Must | **Full†** | `fileTail` configurable + GUI fields (CYB-6110) |
+| 10 | Log filtering | Must | **Full** | `pipeline/filter.js` + GUI rules editor (`filters.defaultAction` / `filters.filters`) |
+| 11 | Security event collection | Must | **Full** | Security channel + auditd; optional Sysmon/Defender |
+| 12 | File integrity monitoring | Must | **Full†** | Baseline persisted on scan; optional native syscheck (queue 8) via `fim.native` (CYB-5996) |
+| 13 | FIM baseline | Must | **Full** | Persisted to `state.fimBaseline` immediately after initial scan (CYB-6031) |
+| 14 | Registry monitoring (Windows) | Must | **Full†** | `registry.keys` via config/GUI and manager `<windows_registry>` in agent.conf |
+| 15 | Rootkit / suspicious system check | Should | **Full** | `security/rootkit-scan.js` scheduled, config-gated; heuristic (not kernel-level) |
+| 16 | Security configuration assessment | Must | **Full†** | SCA policy delivered via pushed `agent.conf` `<sca><policy>` (CYB-6085) |
 | 17 | System inventory | Must | **Full** | CPU, memory, hostname, OS |
 | 18 | Software inventory | Must | **Full** | Windows uninstall registry + dpkg/rpm |
 | 19 | Network inventory | Must | **Full** | Interfaces, routes, DNS (`inventory/scanner.js`) |
@@ -410,37 +414,37 @@ Legend:
 | 21 | Service inventory | Must | **Full** | Win32_Service + `systemctl` |
 | 22 | User/group inventory | Should | **Full** | Local users/groups + `/etc/passwd` `/etc/group` |
 | 23 | Open port / listening inventory | Should | **Full** | Windows TCP + Linux `ss` |
-| 24 | Vulnerability detection input | Must | **Full** | Packages + `Win32_QuickFixEngineering` hotfixes |
-| 25 | Policy/compliance data to tbSIEM | Must | **Full** | SCA state sync with `agent_id`, policy hash |
+| 24 | Vulnerability detection input | Must | **Full†** | Packages + hotfixes to manager vuln-detector; optional on-box CVE feed correlation (`vulnerability.feedPath`) |
+| 25 | Policy/compliance data to tbSIEM | Must | **Full†** | SCA state sync + manager-pushed policy (CYB-6085) |
 | 26 | Local event buffering | Must | **Full** | Durable queues |
 | 27 | Automatic reconnection | Must | **Full** | Exponential backoff + jitter (`transport.js`) |
 | 28 | Event queue management | Must | **Full** | Bounded RAM/spool, `oldestEventAt`, dropped counters |
 | 29 | Event metadata enrichment | Must | **Full** | Cached identity on every event |
 | 30 | Agent logs | Must | **Full** | File logs + `/api/logs` + ring buffer |
 | 31 | Agent health monitoring | Must | **Full** | Health monitor + API |
-| 32 | Remote agent restart | Should | **Full** | Manager commands + `/api/service` + active response |
-| 33 | Agent upgrade | Must | **Partial** | Stream download + SHA-256 + optional RSA manifest signature; MSI primary; auto service rollback TBD |
-| 34 | Agent uninstall / decommission | Must | **Full** | MSI uninstall, purge, GUI decommission |
-| 35 | Active response framework | Must | **Full** | Allowlisted executor |
-| 36 | Process termination | Should | **Full** | `terminate_process` |
-| 37 | IP blocking action | Should | **Full** | `netsh` / `iptables` |
-| 38 | Custom response script | Should | **Full** | `approved_script` + SHA-256 |
+| 32 | Remote agent restart | Should | **Full** | Manager AR/command + `/api/service/restart` + executor |
+| 33 | Agent upgrade | Must | **Full†** | Stream download + SHA-256 + **signature required by default**; MSI primary; rollback still TBD |
+| 34 | Agent uninstall / decommission | Must | **Full†** | GUI/API purge (incl. `manager/`) + best-effort manager deregister (CYB-6092) |
+| 35 | Active response framework | Must | **Full†** | Stock Wazuh AR wire format parsed → allowlisted executor; `activeResponse.enabled` (CYB-6106) |
+| 36 | Process termination | Should | **Full†** | `terminate_process` via AR `kill-process`/`pid` |
+| 37 | IP blocking action | Should | **Full†** | `firewall-drop`/`host-deny` → `netsh`/`iptables` add + delete |
+| 38 | Custom response script | Should | **Full†** | Unknown AR command → `approved_script` (SHA-256 pinned) |
 | 39 | Response audit logging | Must | **Full** | Durable `audit/active-response.jsonl` |
-| 40 | Agent tamper detection | Should | **Full** | Trust store in cache + tamper events |
+| 40 | Agent tamper detection | Should | **Full†** | Broadened paths (install dir/config/deploy) + alert-once + last-known-good hold (CYB-6107) |
 
 ### Coverage summary
 
 | Metric | Count |
 |--------|------:|
-| **Full** | 35 / 40 |
-| **Partial** | 5 / 40 |
+| **Full** (incl. Full†) | 40 / 40 |
+| **Partial** | 0 / 40 |
 | **None** | 0 / 40 |
 
-**Remaining partial (5):** #1 (MSI/Linux packaging validation), #6 (live Wazuh 4.11.2 group config delivery), #9 (multiline file-tail), #12/#14 (FIM/registry require explicit paths), #33 (full signed upgrade + service rollback).
+**Code-complete but pending live validation (Full†):** #1, #5, #6, #8, #9, #12, #14, #16, #24, #25, #33, #34, #35–38, #40 — require a real Wazuh 4.11.2 manager, MSI/deb/rpm install, and (for #6/#35) end-to-end wire testing of the remoted push and AR command formats.
 
 **Wazuh 4.11.2 target:** v4 adapter only (`wazuh.version` 4.11.x); no Wazuh 5.x protocol path in production.
 
-Gaps for strict production sign-off: real-manager E2E (#21 in test plan), central config push from manager (#6), MSI silent install CI (#1), upgrade rollback orchestration (#33).
+Gaps for strict production sign-off: real-manager E2E, MSI silent install CI (#1), upgrade rollback orchestration (#33), and confirming the exact remoted shared-file framing + stock AR JSON on the target manager build.
 
 ---
 

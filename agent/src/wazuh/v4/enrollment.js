@@ -9,6 +9,7 @@ import { saveSecrets, loadSecrets } from '../../security/secrets.js';
  * @param {string} [opts.password]
  * @param {string} [opts.groups]
  * @param {string} [opts.ca]
+ * @param {boolean} [opts.insecure] when true, skip TLS verification (lab only; default secure)
  * @param {string} [opts.agentVersion] Wazuh-style V: field (e.g. Wazuh v4.11.2)
  */
 const ENROLL_SOCKET_MS = 12_000;
@@ -22,10 +23,13 @@ export function enroll(opts) {
       clearTimeout(timer);
       fn(value);
     };
+    // Secure by default: verify the manager unless the operator explicitly opts out
+    // (insecure:true) or supplies a CA. Fail-closed matches docs/security-model.md. CYB-5300.
+    const verify = opts.insecure === true ? false : true;
     const tlsOpts = {
       host: opts.host,
       port: opts.port,
-      rejectUnauthorized: opts.ca ? true : false,
+      rejectUnauthorized: verify,
       ca: opts.ca,
     };
     const socket = tls.connect(tlsOpts, () => {

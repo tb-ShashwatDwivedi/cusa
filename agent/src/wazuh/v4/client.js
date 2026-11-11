@@ -10,8 +10,9 @@ import { padAgentId } from './crypto.js';
 import { FIXED_ENROLLMENT } from '../enrollment-defaults.js';
 import { eventLog } from '../../logging/event-log.js';
 import { formatKeepalive, getWindowsOsLabel, md5Hex } from './keepalive.js';
-import { readFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import { extractMergedFile } from './central-config.js';
+import { readFile, writeFile, mkdir } from 'node:fs/promises';
+import { join, basename } from 'node:path';
 import { truncatePlaintext } from './message-limit.js';
 
 export class WazuhAdapter {
@@ -32,6 +33,11 @@ export class WazuhAdapter {
     this.keepaliveTimer = null;
     this.osLabel = null;
     this.mergedMd5 = null;
+    // Unified manager shared-config location (root/manager). CYB-6085.
+    this.managerDir = options.managerDir || null;
+    // Remoted shared-file push accumulator (#!-up file ... #!-close file).
+    this.sharedFile = { active: false, name: null, md5: null, chunks: [] };
+    this.managerFileHandlers = [];
     this.profile = getProtocolProfile(
       options.version || '4.x',
       options.enrollment,
@@ -179,7 +185,7 @@ export class WazuhAdapter {
   }
 
   async resolveKeepaliveHashes() {
-    const managerDir = this.options.dataDir ? join(this.options.dataDir, 'manager') : null;
+    const managerDir = this.managerDir;
     if (!managerDir) return { configMd5: undefined, mergedMd5: undefined };
     let configMd5;
     try {
@@ -188,9 +194,15 @@ export class WazuhAdapter {
     } catch {
       configMd5 = undefined;
     }
-    // CUSA does not handle remoted shared-file push (merged.mg). Always advertise absent file.
-    this.mergedMd5 = undefined;
-    return { configMd5, mergedMd5: undefined };
+    // Advertise the real merged.mg hash so remoted knows whether to push shared config.
+    // When absent, formatKeepalive() emits the stock "x merged.mg" line. CYB-6085.
+    try {
+      const merged = await readFile(join(managerDir, 'merged.mg'), 'utf8');
+      this.mergedMd5 = md5Hex(merged);
+    } catch {
+      this.mergedMd5 = undefined;
+    }
+    return { configMd5, mergedMd5: this.mergedMd5 };
   }
 
   async sendKeepaliveNow() {
@@ -248,7 +260,8 @@ export class WazuhAdapter {
           agentName: this.options.agentName,
           user: enrollment.apiUser,
           password: enrollment.apiPassword,
-          insecure: enrollment.insecure !== false,
+          insecure: enrollment.insecure === true,
+          ca: enrollment.caCert || undefined,
           groups: (enrollment.groups || ['default']).join(','),
         });
         eventLog.agent('Enrolled via Wazuh API', { agentId: this.identity.id, name: this.identity.name });
@@ -266,7 +279,8 @@ export class WazuhAdapter {
           agentName: this.options.agentName,
           password: enrollment?.password,
           groups,
-          ca: enrollment?.caCert,
+          ca: enrollment?.caCert || undefined,
+          insecure: enrollment?.insecure === true,
           agentVersion: this.profile.enrollVersion,
         });
         eventLog.agent('Enrolled via authd (port 1515)', { agentId: this.identity.id, name: this.identity.name });
@@ -323,6 +337,11 @@ export class WazuhAdapter {
     try {
       const text = decryptMessage(payload, this.encKey);
       for (const handler of this.syncAckHandlers) handler(text);
+      // Remoted shared-file push (merged.mg / agent.conf). Consume the whole
+      // #!-up file ... #!-close file sequence before command parsing. CYB-6085.
+      if (this.sharedFile.active || /^#!-up file\b/.test(text.trim())) {
+        if (this.handleSharedFilePush(text) === 'consumed') return;
+      }
       if (isInboundManagerControl(text)) return;
       if (text.includes('#!-')) {
         const parsed = parseManagerCommand(text);
@@ -331,6 +350,64 @@ export class WazuhAdapter {
     } catch (err) {
       this.logger?.warn({ err }, 'Failed to decrypt manager message');
     }
+  }
+
+  /**
+   * Accumulate a remoted shared-file push. Returns 'consumed' when the message
+   * belongs to an in-flight transfer, 'passthrough' otherwise.
+   * @param {string} text
+   */
+  handleSharedFilePush(text) {
+    const t = text.trim();
+    const up = t.match(/^#!-up file\s+'?([^'\s]+)'?\s+(\S+)([\s\S]*)$/);
+    if (up) {
+      const initial = up[3]?.replace(/^\r?\n/, '') ?? '';
+      this.sharedFile = {
+        active: true,
+        name: basename(up[1]),
+        md5: up[2],
+        chunks: initial ? [initial] : [],
+      };
+      return 'consumed';
+    }
+    if (/^#!-close file\b/.test(t)) {
+      void this.finalizeSharedFile();
+      return 'consumed';
+    }
+    if (this.sharedFile.active) {
+      this.sharedFile.chunks.push(text);
+      return 'consumed';
+    }
+    return 'passthrough';
+  }
+
+  async finalizeSharedFile() {
+    const sf = this.sharedFile;
+    this.sharedFile = { active: false, name: null, md5: null, chunks: [] };
+    if (!sf.name || !this.managerDir) return;
+    const content = sf.chunks.join('');
+    try {
+      await mkdir(this.managerDir, { recursive: true });
+      await writeFile(join(this.managerDir, sf.name), content, 'utf8');
+      if (sf.name === 'merged.mg') {
+        this.mergedMd5 = md5Hex(content);
+        const agentConf = extractMergedFile(content, 'agent.conf');
+        if (agentConf != null) {
+          await writeFile(join(this.managerDir, 'agent.conf'), agentConf, 'utf8');
+        }
+      }
+      eventLog.agent('Received manager shared config', { file: sf.name, bytes: content.length });
+      for (const h of this.managerFileHandlers) {
+        try { await h(sf.name); } catch { /* handler errors isolated */ }
+      }
+    } catch (err) {
+      this.logger?.warn({ err }, 'Failed to persist manager shared file');
+    }
+  }
+
+  /** @param {(name: string) => void} handler fired after a shared file is written to disk */
+  onManagerFile(handler) {
+    this.managerFileHandlers.push(handler);
   }
 
   onCommand(handler) {
@@ -348,9 +425,8 @@ export class WazuhAdapter {
 
   async fetchConfiguration() {
     const { loadManagerAgentConf } = await import('./central-config.js');
-    const { dirname } = await import('node:path');
-    const root = dirname(this.options.dataDir || '.');
-    const loaded = await loadManagerAgentConf(root);
+    // Use the same unified manager dir that syncManagerConfig() and keepalive hashing use.
+    const loaded = this.managerDir ? await loadManagerAgentConf(this.managerDir) : null;
     return loaded?.patch || null;
   }
 

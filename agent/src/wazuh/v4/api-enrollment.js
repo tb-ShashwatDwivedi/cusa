@@ -35,6 +35,7 @@ async function apiGet(base, token, path) {
     method: 'GET',
     headers: { Authorization: `Bearer ${token}` },
     rejectUnauthorized: base.insecure !== true,
+    ca: base.ca,
   });
 }
 
@@ -69,6 +70,7 @@ async function assignAgentGroup(base, token, agentId, group) {
     method: 'PUT',
     headers: { Authorization: `Bearer ${token}` },
     rejectUnauthorized: base.insecure !== true,
+    ca: base.ca,
   });
   if (res.status !== 200) {
     throw new Error(`Assign group failed (${res.status}): ${res.body}`);
@@ -93,8 +95,8 @@ async function fetchExistingAgentKey(opts, token) {
 /** @param {object} opts */
 export async function enrollViaApi(opts) {
   const auth = Buffer.from(`${opts.user}:${opts.password}`).toString('base64');
-  const tls = { rejectUnauthorized: opts.insecure !== true };
-  const base = { host: opts.host, apiPort: opts.apiPort, insecure: opts.insecure };
+  const tls = { rejectUnauthorized: opts.insecure !== true, ca: opts.ca };
+  const base = { host: opts.host, apiPort: opts.apiPort, insecure: opts.insecure, ca: opts.ca };
 
   const tokenRes = await apiRequest({
     hostname: opts.host,
@@ -150,4 +152,37 @@ export async function enrollViaApi(opts) {
   }
 
   throw new Error(`API enroll failed (${agentRes.status}): ${agentRes.body}`);
+}
+
+/**
+ * Deregister this agent from the manager during decommission so stale identities
+ * don't linger in the manager's key store. Best-effort. #34 / CYB-6092.
+ * @param {object} opts @param {string} agentId
+ */
+export async function deregisterAgent(opts, agentId) {
+  if (!agentId) return { ok: false, reason: 'no agent id' };
+  const auth = Buffer.from(`${opts.user}:${opts.password}`).toString('base64');
+  const tokenRes = await apiRequest({
+    hostname: opts.host,
+    port: opts.apiPort || 55000,
+    path: '/security/user/authenticate?raw=true',
+    method: 'POST',
+    headers: { Authorization: `Basic ${auth}` },
+    rejectUnauthorized: opts.insecure !== true,
+    ca: opts.ca,
+  });
+  if (tokenRes.status !== 200) return { ok: false, reason: `auth ${tokenRes.status}` };
+  const token = tokenRes.body.trim();
+  const id = String(agentId).replace(/^0+/, '') || agentId;
+  const path = `/agents?agents_list=${encodeURIComponent(id)}&status=all&older_than=0s`;
+  const res = await apiRequest({
+    hostname: opts.host,
+    port: opts.apiPort || 55000,
+    path,
+    method: 'DELETE',
+    headers: { Authorization: `Bearer ${token}` },
+    rejectUnauthorized: opts.insecure !== true,
+    ca: opts.ca,
+  });
+  return { ok: res.status === 200, status: res.status, body: res.body };
 }

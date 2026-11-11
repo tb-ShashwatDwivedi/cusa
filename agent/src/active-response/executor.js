@@ -10,6 +10,7 @@ export class ActiveResponseExecutor {
   /** @param {object} opts */
   constructor(opts) {
     this.scripts = opts.scripts || {};
+    this.enabled = opts.enabled !== false;
     this.onRestart = opts.onRestart;
     this.onReload = opts.onReload;
     this.onRestartCollectors = opts.onRestartCollectors;
@@ -22,6 +23,11 @@ export class ActiveResponseExecutor {
     const normalized = action === 'reload_configuration' ? 'reload_config' : action;
     if (!isAllowed(action)) {
       return { success: false, status: 'failed', error: `Action not allowed: ${action}` };
+    }
+    // Response actions obey the AR framework toggle; agent-control actions always run.
+    const RESPONSE_ACTIONS = new Set(['terminate_process', 'block_ip', 'approved_script']);
+    if (!this.enabled && RESPONSE_ACTIONS.has(normalized)) {
+      return { success: false, status: 'failed', error: 'Active response disabled' };
     }
 
     switch (normalized) {
@@ -64,10 +70,20 @@ export class ActiveResponseExecutor {
     if (!/^(\d{1,3}\.){3}\d{1,3}(\/\d{1,2})?$/.test(ip)) {
       return { success: false, status: 'failed', error: 'Invalid IP or CIDR' };
     }
+    const ruleName = `CUSA-Block-${ip.replace('/', '-')}`;
+    // AR delete (command "...1") removes the block instead of adding it.
+    if (command.remove) {
+      if (process.platform === 'win32') {
+        await execFileAsync('netsh', ['advfirewall', 'firewall', 'delete', 'rule', `name=${ruleName}`]);
+      } else {
+        await execFileAsync('iptables', ['-D', 'INPUT', '-s', ip, '-j', 'DROP']);
+      }
+      return { success: true, status: 'completed', ip, removed: true, target: { ip } };
+    }
     if (process.platform === 'win32') {
       await execFileAsync('netsh', [
         'advfirewall', 'firewall', 'add', 'rule',
-        `name=CUSA-Block-${ip.replace('/', '-')}`,
+        `name=${ruleName}`,
         'dir=in', 'action=block', `remoteip=${ip}`,
       ]);
     } else {

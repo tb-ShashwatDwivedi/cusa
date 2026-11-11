@@ -36,6 +36,12 @@ export function resolvePaths(root) {
     deploy: join(root, 'config', 'deploy.json'),
     state: join(root, 'state', 'state.json'),
     secrets: join(root, 'secrets', 'secrets.enc'),
+    // Single canonical location for manager-pushed shared config (agent.conf / merged.mg).
+    // Previously three modules disagreed on this path (secrets-file-relative vs dataDir-relative),
+    // so remoted pushes and keepalive hashes never lined up. CYB-6085.
+    managerDir: join(root, 'manager'),
+    managerAgentConf: join(root, 'manager', 'agent.conf'),
+    managerMergedMg: join(root, 'manager', 'merged.mg'),
     queue: join(root, 'queue'),
     logs: join(root, 'logs', 'agent'),
     installerLogs: join(root, 'logs', 'installer'),
