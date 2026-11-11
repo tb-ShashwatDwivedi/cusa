@@ -62,6 +62,26 @@ export async function createApiServer(agent) {
     for (const c of agent.collectors) out[c.name] = await c.health();
     return out;
   });
+  app.post('/api/inventory/resync', async (req, reply) => {
+    if (!requireToken(req, reply)) return;
+    await agent.resetInventorySync();
+    return { ok: true, message: 'Inventory resync queued' };
+  });
+  app.get('/api/inventory/status', async () => {
+    const qs = agent.queue.queueStats();
+    const m = agent.metrics.snapshot();
+    return {
+      lastSync: agent.state.data.lastSync,
+      initialSyncDone: agent.state.data.inventoryInitialSyncDone ?? false,
+      agentId: agent.getStatus().agentId,
+      transportConnected: agent.metrics.transportConnected,
+      inventoryItemsEnqueued: m.inventoryItemsEnqueued ?? 0,
+      stateSent: m.stateSent ?? 0,
+      categories: agent.inventoryStatus || {},
+      queue: qs.state,
+      queues: { events: qs.events, state: qs.state, totalDepth: agent.queue.totalDepth() },
+    };
+  });
   app.get('/api/config', async () => ({
     effective: {
       ...agent.config,

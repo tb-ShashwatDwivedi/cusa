@@ -7,7 +7,7 @@ import {
 } from '../components/ui.jsx';
 
 export default function Diagnostics() {
-  const { data, error, loading } = usePoll(() => api.diagnostics(), 3000);
+  const { data, error, loading } = usePoll(api.diagnostics, 15000);
 
   if (error) {
     return <ErrorBanner>Agent unreachable: {error}</ErrorBanner>;
@@ -17,7 +17,7 @@ export default function Diagnostics() {
     <>
       <PageHeader
         title="Diagnostics"
-        description="Raw diagnostic payload from the agent API. Refreshes every 3 seconds."
+        description="Raw diagnostic payload from the agent API. Refreshes every 15 seconds while this page is open."
       />
 
       {loading && !data ? (

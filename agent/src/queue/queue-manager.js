@@ -1,4 +1,6 @@
 import { DurableQueue } from './durable-queue.js';
+import { DeliveryLedger } from './delivery-ledger.js';
+import { isLegacySyscheckState } from '../fim/wire-event.js';
 
 export class QueueManager {
   /** @param {string} queueRoot @param {object} config */
@@ -13,11 +15,15 @@ export class QueueManager {
     this.commands = new DurableQueue(queueRoot, 'commands', qOpts);
     this.results = new DurableQueue(queueRoot, 'command-results', qOpts);
     this.flushIntervalMs = config.flushIntervalMs || 1000;
+    this.disconnectedFlushIntervalMs = config.disconnectedFlushIntervalMs || 20000;
     this.batchSize = config.batchSize || 50;
     this.backlogFlushIntervalMs = config.backlogFlushIntervalMs || this.flushIntervalMs;
+    this.stateBatchSize = config.stateBatchSize || 100;
+    this.maxEventBatchSize = config.maxEventBatchSize || 100;
     this.maxRetries = config.maxRetries || 10;
     this.running = false;
     this.flushTimers = [];
+    this.deliveryLedger = new DeliveryLedger();
   }
 
   async init() {
@@ -71,32 +77,79 @@ export class QueueManager {
 
     const flushEvents = async () => {
       if (!this.running) return;
+      if (!metrics.transportConnected) {
+        schedule(flushEvents, this.disconnectedFlushIntervalMs);
+        return;
+      }
+      const eventDepth = this.events.depth();
+      const backlog = eventDepth > 150;
+      const batchLimit = backlog
+        ? Math.min(this.maxEventBatchSize, this.batchSize * 2)
+        : this.batchSize;
+      const nextDelay = backlog
+        ? Math.max(150, Math.floor(this.flushIntervalMs / 2))
+        : this.flushIntervalMs;
       const batch = [];
-      for (let i = 0; i < this.batchSize; i++) {
+      for (let i = 0; i < batchLimit; i++) {
         const item = await this.events.dequeue();
         if (!item) break;
         batch.push(item);
       }
       if (batch.length) {
         try {
-          await wazuh.sendEvents(batch.map((b) => b.payload));
-          for (const item of batch) await this.events.ack(item.id);
+          const toSend = [];
+          for (const item of batch) {
+            if (this.deliveryLedger.wasSent(item.id)) {
+              metrics.inc('eventsDeliveryDuplicateSuppressed');
+              await this.events.ack(item.id);
+              continue;
+            }
+            toSend.push(item);
+          }
+          if (toSend.length) {
+            await wazuh.sendEvents(toSend.map((b) => b.payload));
+            for (const item of toSend) {
+              this.deliveryLedger.markSent(item.id);
+              await this.events.ack(item.id);
+            }
+          }
         } catch {
-          for (const item of batch) await this.events.requeue(item.id);
+          for (const item of batch) {
+            if (!this.deliveryLedger.wasSent(item.id)) await this.events.requeue(item.id);
+          }
+          metrics.inc('eventsFailed');
         }
       }
       batch.length = 0;
       metrics.set('queueDepth', this.totalDepth());
       metrics.set('queueDropped', this.totalDropped());
-      schedule(flushEvents, this.flushIntervalMs);
+      schedule(flushEvents, nextDelay);
     };
 
     const flushState = async () => {
       if (!this.running) return;
+      if (!metrics.transportConnected) {
+        schedule(flushState, this.disconnectedFlushIntervalMs);
+        return;
+      }
+      const stateDepth = this.state.depth();
+      const stateLimit = stateDepth > 200
+        ? this.stateBatchSize * 4
+        : stateDepth > 50
+          ? this.stateBatchSize * 2
+          : this.stateBatchSize;
+      const stateDelay = stateDepth > 0
+        ? Math.min(400, Math.max(150, this.flushIntervalMs / 2))
+        : this.flushIntervalMs * 2;
       const items = [];
-      for (let i = 0; i < 100; i++) {
+      for (let i = 0; i < stateLimit; i++) {
         const item = await this.state.dequeue();
         if (!item) break;
+        if (isLegacySyscheckState(item.payload)) {
+          await this.state.ack(item.id);
+          metrics.inc('stateLegacySyscheckDropped');
+          continue;
+        }
         items.push(item);
       }
       if (items.length) {
@@ -108,7 +161,7 @@ export class QueueManager {
         }
       }
       items.length = 0;
-      schedule(flushState, this.flushIntervalMs * 2);
+      schedule(flushState, stateDelay);
     };
 
     const flushResults = async () => {
@@ -143,6 +196,12 @@ export class QueueManager {
     this.running = false;
     for (const t of this.flushTimers) clearTimeout(t);
     this.flushTimers = [];
+    return Promise.all([
+      this.events.flushPending(),
+      this.state.flushPending(),
+      this.commands.flushPending(),
+      this.results.flushPending(),
+    ]);
   }
 
   /** Wipe all queued items (does not affect Wazuh counters on manager). */

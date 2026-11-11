@@ -10,7 +10,7 @@ import {
 } from '../components/ui.jsx';
 
 export default function Fim() {
-  const { data, error, loading } = usePoll(() => api.fim(), 5000);
+  const { data, error, loading } = usePoll(api.fim, 15000);
 
   if (error) {
     return <ErrorBanner>Agent unreachable: {error}</ErrorBanner>;

@@ -5,6 +5,8 @@ import https from 'node:https';
  * @see https://documentation.wazuh.com/current/user-manual/agent/agent-enrollment/enrollment-methods/via-manager-API/
  */
 
+const API_REQUEST_MS = 12_000;
+
 /** @param {object} opts */
 function apiRequest(opts) {
   return new Promise((resolve, reject) => {
@@ -14,6 +16,9 @@ function apiRequest(opts) {
       res.on('end', () => {
         resolve({ status: res.statusCode, body: Buffer.concat(chunks).toString('utf8') });
       });
+    });
+    req.setTimeout(API_REQUEST_MS, () => {
+      req.destroy(new Error('API request timed out'));
     });
     req.on('error', reject);
     if (opts.body) req.write(opts.body);

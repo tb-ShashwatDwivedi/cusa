@@ -21,5 +21,5 @@ export function computeDelta(previous, current) {
       delta.push({ ...item, operation: 'delete' });
     }
   }
-  return delta.length ? delta : current.map((i) => ({ ...i, operation: i.operation || 'update' }));
+  return delta;
 }

@@ -54,7 +54,7 @@ export default function Logs() {
     () => api.logs({ category: tab, limit: 200 }),
     [tab],
   );
-  const { data, error, loading } = usePoll(fetchLogs, 2000);
+  const { data, error, loading } = usePoll(fetchLogs, 5000);
 
   const logs = data?.logs || [];
 

@@ -1,9 +1,65 @@
+# --- Dependencies ---
 node_modules/
-agent/node_modules/
-gui/node_modules/
+**/node_modules/
+
+# --- Local / secrets (never commit) ---
 agent/config/config.local.json
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+secrets.enc
+
+# --- Dev agent runtime data (if ever created inside the repo) ---
 **/.cusa/
+.cusa/
+agent.pid
+memory-benchmark.jsonl
+
+# --- Release & build outputs ---
 build/
 dist/
 gui/dist/
+
+# Built binaries (under build/ or copied to path)
+**/cusa-agent.exe
+**/cusa-service-host.exe
+**/cusa-updater.exe
+
+# Installer artifacts (also under dist/)
+*.msi
+*.msm
+*.wixpdb
+*.wixobj
+*.wixout
+
+# --- Rust (Tauri GUI, Windows service, updater) ---
 src-tauri/target/
+service-host/target/
+updater-stub/target/
+
+# --- Frontend tooling cache ---
+.vite/
+gui/.vite/
+*.tsbuildinfo
+
+# --- Test / coverage ---
+coverage/
+.nyc_output/
+
+# --- Linters / formatters ---
+.eslintcache
+.prettiercache
+
+# --- OS & editors ---
+.DS_Store
+Thumbs.db
+desktop.ini
+*.swp
+*.swo
+*~
+.idea/
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json.example

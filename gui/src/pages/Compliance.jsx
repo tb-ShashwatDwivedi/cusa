@@ -13,7 +13,7 @@ import {
 const STATUS_TONE = { passed: 'ok', failed: 'err', not_applicable: 'neutral' };
 
 export default function Compliance() {
-  const { data, error, loading } = usePoll(() => api.compliance(), 10000);
+  const { data, error, loading } = usePoll(api.compliance, 15000);
 
   if (error) {
     return <ErrorBanner>Agent unreachable: {error}</ErrorBanner>;

@@ -5,8 +5,15 @@ export class Metrics {
   constructor() {
     this.counters = {
       eventsCollected: 0,
+      eventsAccepted: 0,
       eventsSent: 0,
       eventsFailed: 0,
+      eventsFiltered: 0,
+      eventsInvalid: 0,
+      eventsSourceReplaySuppressed: 0,
+      eventsDeliveryDuplicateSuppressed: 0,
+      eventsDroppedBackpressure: 0,
+      inventoryItemsEnqueued: 0,
       queueDepth: 0,
       queueDropped: 0,
       commandsReceived: 0,

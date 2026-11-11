@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { api } from '../services/api.js';
 import { usePoll } from '../hooks/usePoll.js';
+import { useAgentStatus } from '../context/StatusContext.jsx';
 import {
   ErrorBanner,
   MetricGrid,
@@ -17,10 +18,9 @@ function fmt(value, fallback = 'n/a') {
 }
 
 export default function Dashboard() {
-  const { data: status, error, loading } = usePoll(() => api.status());
-  const { data: queue, loading: queueLoading } = usePoll(() => api.queue());
-  const { data: health, loading: healthLoading } = usePoll(() => api.health());
-  const { data: service } = usePoll(() => api.service(), 5000);
+  const { data: status, error, loading } = useAgentStatus();
+  const { data: health, loading: healthLoading } = usePoll(api.health, 15000);
+  const { data: service } = usePoll(api.service, 15000);
   const [svcBusy, setSvcBusy] = useState(false);
   const [svcError, setSvcError] = useState(null);
   const [svcMessage, setSvcMessage] = useState(null);
@@ -42,7 +42,8 @@ export default function Dashboard() {
   const connected = status?.transportConnected;
   const metrics = status?.metrics || {};
   const healthy = health?.status === 'healthy';
-  const busy = loading || queueLoading || healthLoading;
+  const queue = status?.queue;
+  const busy = loading || healthLoading;
 
   return (
     <>

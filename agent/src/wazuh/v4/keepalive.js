@@ -21,9 +21,21 @@ export function pickAgentIp() {
   return '127.0.0.1';
 }
 
-/** @param {string} [version] e.g. Wazuh v4.11.2 */
-export function md5EmptyConfig(version = 'Wazuh v4.11.2') {
-  return createHash('md5').update(`cusa-empty-config:${version}`).digest('hex');
+/** MD5 hex of buffer/string (Wazuh OS_MD5_File style). */
+export function md5Hex(data) {
+  const buf = typeof data === 'string' ? Buffer.from(data, 'utf8') : data;
+  return createHash('md5').update(buf).digest('hex');
+}
+
+/** Stock agent uses "x merged.mg" when shared merged.mg is absent. */
+export const NO_MERGED_MG_LINE = 'x merged.mg';
+
+/** Build getuname()-style line body (without #!- prefix). */
+export function buildUname(osLabel, agentVersion = 'v4.11.2') {
+  const ver = agentVersion.startsWith('v') ? agentVersion : `v${agentVersion}`;
+  const label = osLabel.trim();
+  if (/\s-\sWazuh\s+v/i.test(label)) return label;
+  return `${label} - Wazuh ${ver}`;
 }
 
 /** Stock Windows uname-style string for remoted OS detection. */
@@ -57,13 +69,25 @@ export async function getWindowsOsLabel() {
  * @param {string} [opts.mergedMd5]
  * @param {string} [opts.agentIp]
  */
+/**
+ * Stock Wazuh 4.x keepalive (notify.c run_notify).
+ * Must contain at least one `\n` or remoted logs "Invalid message from agent".
+ */
 export function formatKeepalive(opts) {
-  const agentVersion = opts.agentVersion || 'v4.11.2';
-  const configMd5 = opts.configMd5 || md5EmptyConfig(`Wazuh ${agentVersion}`);
-  const mergedMd5 = opts.mergedMd5 || createHash('md5').update('empty-merged.mg').digest('hex');
+  const uname = buildUname(opts.osLabel, opts.agentVersion || 'v4.11.2');
   const ip = opts.agentIp || pickAgentIp();
-  const line1 = `#!-${opts.osLabel} - Wazuh ${agentVersion} / ${configMd5}`;
-  const line2 = `${mergedMd5} merged.mg`;
-  const line3 = `#"_agent_ip":${ip}`;
-  return `${line1}\n${line2}\n${line3}\n`;
+  const lines = [];
+  if (opts.configMd5) {
+    lines.push(`#!-${uname} / ${opts.configMd5}`);
+  } else {
+    lines.push(`#!-${uname}`);
+  }
+  const mergedLine =
+    opts.mergedMd5 && opts.mergedMd5 !== 'x'
+      ? `${opts.mergedMd5} merged.mg`
+      : NO_MERGED_MG_LINE;
+  lines.push(mergedLine);
+  if (ip) lines.push(`#"_agent_ip":${ip}`);
+  // Stock Windows agents use CRLF; remoted only requires at least one \n.
+  return `${lines.join('\r\n')}\r\n`;
 }

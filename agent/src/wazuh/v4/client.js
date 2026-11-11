@@ -5,11 +5,13 @@ import { TcpTransport } from './transport.js';
 import { serializeEvent } from './event-serializer.js';
 import { runSync } from './sync-protocol.js';
 import { getProtocolProfile } from '../version.js';
-import { parseManagerCommand, formatCommandAck } from './commands.js';
+import { parseManagerCommand, formatCommandAck, isInboundManagerControl } from './commands.js';
 import { padAgentId } from './crypto.js';
 import { FIXED_ENROLLMENT } from '../enrollment-defaults.js';
 import { eventLog } from '../../logging/event-log.js';
-import { formatKeepalive, getWindowsOsLabel, md5EmptyConfig } from './keepalive.js';
+import { formatKeepalive, getWindowsOsLabel, md5Hex } from './keepalive.js';
+import { readFile } from 'node:fs/promises';
+import { join } from 'node:path';
 import { truncatePlaintext } from './message-limit.js';
 
 export class WazuhAdapter {
@@ -37,17 +39,28 @@ export class WazuhAdapter {
   }
 
   sendPlaintext(plaintext) {
+    return this._sendPlaintext(plaintext, { countAsState: true });
+  }
+
+  /** Control plane (#!- startup / keepalive) — same crypto, not inventory/state metrics. */
+  sendControl(plaintext) {
+    return this._sendPlaintext(plaintext, { countAsState: false, control: true });
+  }
+
+  /** @param {string} plaintext @param {{ countAsState?: boolean, control?: boolean }} opts */
+  _sendPlaintext(plaintext, opts = {}) {
     if (!this.encKey) throw new Error('Not enrolled');
     const counters = this.state.nextCounters();
+    const body = opts.control ? plaintext : truncatePlaintext(plaintext);
     const payload = encryptMessage(
-      truncatePlaintext(plaintext),
+      body,
       counters,
       this.encKey,
       this.identity?.id,
     );
     const sent = this.transport?.send(payload);
     if (sent) {
-      this.metrics?.inc('stateSent');
+      if (opts.countAsState) this.metrics?.inc('stateSent');
       return this.state.save();
     }
     throw new Error('Transport not connected');
@@ -149,7 +162,7 @@ export class WazuhAdapter {
   async sendHandshake() {
     if (!this.encKey || !this.identity) return;
     try {
-      this.sendPlaintext('#!-agent startup {"version":"v4.11.2"}');
+      this.sendControl('#!-agent startup {"version":"v4.11.2"}\n');
     } catch (err) {
       this.logger?.warn({ err }, 'Failed to send agent startup');
       return;
@@ -161,21 +174,47 @@ export class WazuhAdapter {
         this.osLabel = 'Microsoft Windows [Ver: 10.0.0.0]';
       }
     }
-    this.sendKeepaliveNow();
+    await this.sendKeepaliveNow();
     this.startKeepalive();
   }
 
-  sendKeepaliveNow() {
+  async resolveKeepaliveHashes() {
+    const managerDir = this.options.dataDir ? join(this.options.dataDir, 'manager') : null;
+    if (!managerDir) return { configMd5: undefined, mergedMd5: undefined };
+    let configMd5;
+    try {
+      const agentConf = await readFile(join(managerDir, 'agent.conf'), 'utf8');
+      configMd5 = md5Hex(agentConf);
+    } catch {
+      configMd5 = undefined;
+    }
+    // CUSA does not handle remoted shared-file push (merged.mg). Always advertise absent file.
+    this.mergedMd5 = undefined;
+    return { configMd5, mergedMd5: undefined };
+  }
+
+  async sendKeepaliveNow() {
     if (!this.encKey || !this.identity) return;
     const version = (this.profile.enrollVersion || 'Wazuh v4.11.2').replace(/^Wazuh\s+/i, '');
+    const agentVersion = version.startsWith('v') ? version : `v${version}`;
+    let hashes = { configMd5: undefined, mergedMd5: this.mergedMd5 };
+    try {
+      hashes = await this.resolveKeepaliveHashes();
+    } catch {
+      // use cached merged md5 only
+    }
     const text = formatKeepalive({
       osLabel: this.osLabel || 'Microsoft Windows [Ver: 10.0.0.0]',
-      agentVersion: version.startsWith('v') ? version : `v${version}`,
-      configMd5: md5EmptyConfig(this.profile.enrollVersion),
-      mergedMd5: this.mergedMd5,
+      agentVersion,
+      configMd5: hashes.configMd5,
+      mergedMd5: hashes.mergedMd5,
     });
+    if (!text.includes('\n')) {
+      this.logger?.warn('Keepalive missing newline; skipping send');
+      return;
+    }
     try {
-      this.sendPlaintext(text);
+      this.sendControl(text);
     } catch (err) {
       this.logger?.warn({ err }, 'Failed to send keepalive');
     }
@@ -183,7 +222,9 @@ export class WazuhAdapter {
 
   startKeepalive() {
     this.stopKeepalive();
-    this.keepaliveTimer = setInterval(() => this.sendKeepaliveNow(), 10000);
+    this.keepaliveTimer = setInterval(() => {
+      void this.sendKeepaliveNow();
+    }, 10000);
     this.keepaliveTimer.unref?.();
   }
 
@@ -246,6 +287,7 @@ export class WazuhAdapter {
   /** @param {object[]} events */
   async sendEvents(events) {
     if (!this.encKey) throw new Error('Not enrolled');
+    let sentAny = false;
     for (const event of events) {
       const plaintext = truncatePlaintext(serializeEvent(event));
       const counters = this.state.nextCounters();
@@ -253,12 +295,13 @@ export class WazuhAdapter {
       const sent = this.transport?.send(payload);
       if (sent) {
         this.metrics?.inc('eventsSent');
-        await this.state.save();
+        sentAny = true;
       } else {
         this.metrics?.inc('eventsFailed');
         throw new Error('Transport not connected');
       }
     }
+    if (sentAny) await this.state.save();
   }
 
   /** @param {object[]} items */
@@ -280,6 +323,7 @@ export class WazuhAdapter {
     try {
       const text = decryptMessage(payload, this.encKey);
       for (const handler of this.syncAckHandlers) handler(text);
+      if (isInboundManagerControl(text)) return;
       if (text.includes('#!-')) {
         const parsed = parseManagerCommand(text);
         for (const handler of this.commandHandlers) handler(parsed);
@@ -299,7 +343,7 @@ export class WazuhAdapter {
 
   async sendCommandResult(result) {
     const ack = formatCommandAck(result);
-    await this.sendPlaintext(ack);
+    this.sendControl(ack);
   }
 
   async fetchConfiguration() {

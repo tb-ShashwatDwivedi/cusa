@@ -20,6 +20,13 @@ export class Collector {
     this.onEvent?.(partial);
   }
 
+  /** @param {object} partial @returns {Promise<void>} */
+  async emitAsync(partial) {
+    const fn = this.onEvent;
+    if (!fn) return;
+    await fn(partial);
+  }
+
   async start() {
     this.running = true;
   }

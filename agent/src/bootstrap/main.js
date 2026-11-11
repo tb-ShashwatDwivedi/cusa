@@ -6,6 +6,7 @@ import { acquireSingleInstanceLock, releaseSingleInstanceLock } from '../platfor
 import { getPaths } from '../config/loader.js';
 
 async function main() {
+  console.error('[cusa-agent] loading configuration…');
   const config = await loadConfig(process.env.CUSA_CONFIG || undefined);
   const paths = config._paths || getPaths(config.agent?.dataDir);
   if (paths?.root) {
@@ -38,7 +39,11 @@ async function main() {
     dataDir: config.agent?.dataDir,
     deploySource: config.deploy?.source,
   });
+  console.error('[cusa-agent] starting core…');
   await agent.start();
+  console.error(
+    `[cusa-agent] listening on http://${config.api?.host || '127.0.0.1'}:${config.api?.port ?? 8710}`,
+  );
 }
 
 main().catch((err) => {

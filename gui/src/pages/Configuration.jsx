@@ -1,6 +1,7 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useEffect, useState } from 'react';
 import { api } from '../services/api.js';
 import { usePoll } from '../hooks/usePoll.js';
+import { useAgentStatus } from '../context/StatusContext.jsx';
 import {
   Badge,
   ErrorBanner,
@@ -16,6 +17,7 @@ const FIELDS = [
   { path: 'collectors.eventChannel.enabled', label: 'Windows event channel', type: 'boolean' },
   { path: 'collectors.sysmon.enabled', label: 'Sysmon collector', type: 'boolean' },
   { path: 'collectors.defender.enabled', label: 'Defender collector', type: 'boolean' },
+  { path: 'collectors.powershell.enabled', label: 'PowerShell collector', type: 'boolean' },
   { path: 'collectors.journald.enabled', label: 'Journald collector', type: 'boolean' },
   { path: 'collectors.syslog.enabled', label: 'Syslog collector', type: 'boolean' },
   { path: 'collectors.auditd.enabled', label: 'Auditd collector', type: 'boolean' },
@@ -67,9 +69,8 @@ function fromInput(path, raw, type) {
 }
 
 export default function Configuration() {
-  const fetchConfig = useCallback(() => api.config(), []);
-  const { data, error, loading } = usePoll(fetchConfig, 10000);
-  const { data: status } = usePoll(() => api.status(), 5000);
+  const { data, error, loading } = usePoll(api.config, 15000);
+  const { data: status } = useAgentStatus();
   const [draft, setDraft] = useState({});
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState(null);

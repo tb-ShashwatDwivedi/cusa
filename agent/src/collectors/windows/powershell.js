@@ -5,10 +5,8 @@ export class PowerShellCollector extends WindowsEventChannelCollector {
     super(
       {
         ...config,
-        channels: [
-          'Microsoft-Windows-PowerShell/Operational',
-          'Windows PowerShell',
-        ],
+        // Classic "Windows PowerShell" logs the collector's own Get-WinEvent script (archive bloat).
+        channels: ['Microsoft-Windows-PowerShell/Operational'],
       },
       state,
     );

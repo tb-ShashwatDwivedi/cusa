@@ -17,4 +17,9 @@ describe('inventory delta', () => {
     assert.ok(delta.find((d) => d.id === 'b' && d.operation === 'delete'));
     assert.ok(delta.find((d) => d.id === 'c' && d.operation === 'create'));
   });
+
+  it('returns empty array when nothing changed', () => {
+    const items = [{ id: 'a', data: { x: 1 } }];
+    assert.deepEqual(computeDelta(items, items), []);
+  });
 });

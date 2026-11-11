@@ -3,6 +3,8 @@
  * @see docs/README.md §3.4 / §4
  */
 
+import { serializeInventoryDbsync } from '../../inventory/dbsync-wire.js';
+
 const COLLECTOR_QUEUE = {
   'event-channel': 'f',
   sysmon: 'f',
@@ -36,12 +38,18 @@ export function serializeEvent(event) {
 /** @param {object} item inventory/fim state item */
 export function serializeStateItem(item) {
   const index = item.index || '';
-  const payload = JSON.stringify(item.data ?? item);
   if (index.includes('fim') || index.includes('registry')) {
-    const loc = item.data?.path || item.data?.key || 'syscheck';
-    return `8:${loc}:${payload}`;
+    const payload = JSON.stringify({
+      source: index.includes('registry') ? 'cusa_registry' : 'cusa_fim',
+      ...(item.data ?? item),
+      type: item.operation === 'delete' ? 'deletion' : 'modification',
+    });
+    return `1:${index.includes('registry') ? 'cusa-registry' : 'cusa-fim'}:${payload}`;
   }
-  if (index.includes('sca')) return `p:sca:${payload}`;
-  // Wazuh 4.11 syscollector location is `syscollector`, not OpenSearch index names.
+  if (index.includes('sca')) return `p:sca:${JSON.stringify(item.data ?? item)}`;
+  if (index.includes('inventory') || item.category) {
+    return serializeInventoryDbsync(item);
+  }
+  const payload = JSON.stringify(item.data ?? item);
   return `d:syscollector:${payload}`;
 }

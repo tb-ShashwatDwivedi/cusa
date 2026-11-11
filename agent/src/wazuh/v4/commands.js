@@ -3,6 +3,16 @@
  * @see docs/wazuh-compatibility.md §10
  */
 
+/** Manager → agent control that must not be executed or echoed back. */
+export function isInboundManagerControl(text) {
+  const t = String(text).trim();
+  if (/^#!-agent ack\b/.test(t)) return true;
+  if (/^#!-up file\b/.test(t)) return true;
+  if (/^#!-close file\b/.test(t)) return true;
+  if (/^#!-agent error\b/.test(t)) return true;
+  return false;
+}
+
 /** @param {string} text */
 export function parseManagerCommand(text) {
   const trimmed = text.trim();
@@ -37,5 +47,6 @@ function mapWazuhCommand(body) {
 export function formatCommandAck(result) {
   const counter = result.counter ?? result.taskId ?? 0;
   const payload = JSON.stringify({ success: result.success !== false, ...result });
-  return `#!-agent ack ${counter} ${payload}`;
+  // remoted save_controlmsg() requires a newline for non-startup control bodies.
+  return `#!-agent ack ${counter} ${payload}\n`;
 }

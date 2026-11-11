@@ -9,7 +9,7 @@ import {
 } from '../components/ui.jsx';
 
 export default function Collectors() {
-  const { data, error, loading } = usePoll(() => api.collectors());
+  const { data, error, loading } = usePoll(api.collectors, 15000);
 
   if (error) {
     return <ErrorBanner>Agent unreachable: {error}</ErrorBanner>;

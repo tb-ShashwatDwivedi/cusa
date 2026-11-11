@@ -59,6 +59,30 @@ Top bar (all pages): enrollment pill, **Manager connected / disconnected**, serv
 
 Use your manager UI or API to confirm events, syscollector state, and agent list. Agent ID and connectivity should match **Dashboard** enrollment block.
 
+**Syscollector API (manager `55000`):** use `pretty=true`, not bare `?pretty` (Wazuh validates `pretty` as boolean; `?pretty` alone sends `''` and returns 400). Endpoint is **`hotfixes`**, not `hostfixes`.
+
+```bash
+TOKEN=$(curl -s -k -u 'wazuh-wui:wazuh-wui' -X POST \
+  'https://<MANAGER>:55000/security/user/authenticate?raw=true')
+
+# Replace 018 with agent id from GET /agents (zero-padded, e.g. 002, 018)
+curl -s -k -H "Authorization: Bearer $TOKEN" \
+  'https://<MANAGER>:55000/syscollector/018/os?pretty=true'
+curl -s -k -H "Authorization: Bearer $TOKEN" \
+  'https://<MANAGER>:55000/syscollector/018/packages?pretty=true&limit=10'
+curl -s -k -H "Authorization: Bearer $TOKEN" \
+  'https://<MANAGER>:55000/syscollector/018/hotfixes?pretty=true'
+```
+
+Empty `affected_items` with HTTP 200 and `"message": "No syscollector information was returned"` means the **manager syscollector SQLite/API tables** have no rows for that agent id. Work through this order:
+
+1. **Same agent id** — `GET /api/inventory/status` → `agentId` must match the API path (`018`). On manager: `GET /agents/018?pretty=true` (name/IP should be your CUSA host).
+2. **Scan vs send** — `categories.*.count` &gt; 0 and `initialSyncDone: true` only prove the agent **scanned**. Check `transportConnected: true`, `inventoryItemsEnqueued`, `stateSent`, and `queue.state.depth` (should fall toward 0 after connect). High `queue.state.depth` with `stateSent` flat ⇒ inventory still queued or flush failing.
+3. **Wire shape** — Manager `analysisd` expects `d:syscollector:` + JSON with top-level `type` (`dbsync_packages`, `dbsync_osinfo`, …), `operation` (`INSERTED|MODIFIED|DELETED`), and `data` (see Wazuh 4.11 `syscollector.c` / PR #16389). CUSA builds this in `agent/src/inventory/dbsync-wire.js`. Wrong `type` suffix (e.g. `dbsync_sysinfo`) is dropped by `get_field_list()` and never hits wazuh-db. After a format fix, `POST /api/inventory/resync` (with local API token) forces a full INSERTED resync. PowerShell: `$t=(Invoke-RestMethod http://127.0.0.1:8710/api/status).localApiToken; Invoke-RestMethod -Method POST -Uri http://127.0.0.1:8710/api/inventory/resync -Headers @{ 'X-Cusa-Token'=$t }` (no body required after agent restart).
+4. **Stock syscollector** — The API reflects the **syscollector module** database. A manager-enrolled agent that never runs compatible syscollector sync will always return empty here even when logs (queue `f:`) work.
+
+5. **`merged.mg` warning (1246)** — If the keepalive advertises a real `merged.mg` MD5, remoted tries to push that file to the agent. CUSA does not implement shared-file download; keepalive must use `x merged.mg` (no push). After fix, `Unable to send file 'merged.mg'` should stop on the next keepalive cycle.
+
 ---
 
 ## Verification checklist (40 features)

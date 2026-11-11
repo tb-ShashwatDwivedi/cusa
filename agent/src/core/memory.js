@@ -1,4 +1,8 @@
-import { eventLoopUtilization } from 'node:perf_hooks';
+import { eventLoopUtilization as eluImport } from 'node:perf_hooks';
+
+/** SEA / some embedders ship perf_hooks without eventLoopUtilization — must not call at load. */
+const eventLoopUtilization =
+  typeof eluImport === 'function' ? eluImport : null;
 
 const MB = 1024 * 1024;
 
@@ -58,16 +62,24 @@ export function activeHandleEstimate() {
   };
 }
 
-let lastElu = eventLoopUtilization();
+/** @type {import('node:perf_hooks').EventLoopUtilization | null} */
+let lastElu = null;
 
-/** @returns {{ idle: number, active: number, utilization: number }} */
+/** @returns {{ idle: number, active: number, utilization: number, available?: boolean }} */
 export function eventLoopSnapshot() {
+  if (!eventLoopUtilization) {
+    return { idle: 0, active: 0, utilization: 0, available: false };
+  }
+  if (lastElu === null) {
+    lastElu = eventLoopUtilization();
+  }
   const elu = eventLoopUtilization(lastElu);
   lastElu = eventLoopUtilization();
   return {
     idle: elu.idle,
     active: elu.active,
     utilization: elu.utilization,
+    available: true,
   };
 }
 

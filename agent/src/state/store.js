@@ -50,16 +50,27 @@ export class StateStore {
   }
 
   async save() {
-    await mkdir(dirname(this.path), { recursive: true }).catch(() => {});
-    const tmp = `${this.path}.tmp`;
-    const body = JSON.stringify(this.data, null, 2);
-    await writeFile(tmp, body);
-    try {
-      await rename(tmp, this.path);
-      await writeFile(`${this.path}.bak`, body);
-    } catch {
-      await writeFile(this.path, body);
+    this._savePending = true;
+    if (this._saveInFlight) return this._saveInFlight;
+    this._saveInFlight = this._drainSave();
+    return this._saveInFlight;
+  }
+
+  async _drainSave() {
+    while (this._savePending) {
+      this._savePending = false;
+      await mkdir(dirname(this.path), { recursive: true }).catch(() => {});
+      const tmp = `${this.path}.tmp`;
+      const body = JSON.stringify(this.data, null, 2);
+      await writeFile(tmp, body);
+      try {
+        await rename(tmp, this.path);
+        await writeFile(`${this.path}.bak`, body);
+      } catch {
+        await writeFile(this.path, body);
+      }
     }
+    this._saveInFlight = null;
   }
 
   nextCounters() {

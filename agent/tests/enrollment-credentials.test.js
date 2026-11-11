@@ -32,8 +32,12 @@ describe('4.11 state serialize', () => {
   it('uses syscollector location instead of OpenSearch index names', () => {
     const line = serializeStateItem({
       index: 'wazuh-states-inventory-system',
-      data: { os: 'win32' },
+      category: 'system',
+      data: { os_name: 'win32' },
     });
-    assert.equal(line, 'd:syscollector:{"os":"win32"}');
+    assert.ok(line.startsWith('d:syscollector:'));
+    const body = JSON.parse(line.slice('d:syscollector:'.length));
+    assert.equal(body.type, 'dbsync_osinfo');
+    assert.equal(body.data.os_name, 'win32');
   });
 });

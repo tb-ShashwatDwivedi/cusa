@@ -17,9 +17,9 @@ export function createCollectors(config, state) {
     if (cfg.eventChannel?.enabled !== false) {
       collectors.push(new WindowsEventChannelCollector(cfg.eventChannel || {}, state));
     }
-    if (cfg.sysmon?.enabled) collectors.push(new SysmonCollector(cfg.sysmon, state));
-    if (cfg.defender?.enabled) collectors.push(new DefenderCollector(cfg.defender, state));
-    if (cfg.powershell?.enabled) collectors.push(new PowerShellCollector(cfg.powershell, state));
+    if (cfg.sysmon?.enabled !== false) collectors.push(new SysmonCollector(cfg.sysmon || {}, state));
+    if (cfg.defender?.enabled !== false) collectors.push(new DefenderCollector(cfg.defender || {}, state));
+    if (cfg.powershell?.enabled !== false) collectors.push(new PowerShellCollector(cfg.powershell || {}, state));
   } else {
     if (cfg.journald?.enabled !== false) collectors.push(new JournaldCollector(cfg.journald || {}, state));
     if (cfg.syslog?.enabled !== false) collectors.push(new SyslogCollector(cfg.syslog || {}));

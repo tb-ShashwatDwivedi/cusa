@@ -11,8 +11,8 @@ import {
   Scroll,
   Prohibit,
 } from '@phosphor-icons/react';
-import { api, setApiToken } from './services/api.js';
-import { usePoll } from './hooks/usePoll.js';
+import { setApiToken } from './services/api.js';
+import { useAgentStatus } from './context/StatusContext.jsx';
 import { StatusPill } from './components/ui.jsx';
 import { EnrollmentStatus } from './components/enrollment.jsx';
 import Dashboard from './pages/Dashboard.jsx';
@@ -48,7 +48,7 @@ const pageTitles = {
 
 export default function App() {
   const location = useLocation();
-  const { data: status, error } = usePoll(() => api.status(), 5000);
+  const { data: status, error } = useAgentStatus();
 
   useEffect(() => {
     if (status?.localApiToken) setApiToken(status.localApiToken);

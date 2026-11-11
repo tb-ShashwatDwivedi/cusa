@@ -14,6 +14,8 @@ export class FimWatcher {
     this.logger = logger;
     this.watchers = [];
     this.onChange = null;
+    this.baselineFiles = 0;
+    this.maxBaselineFiles = config.maxBaselineFiles ?? 300;
   }
 
   /** @param {(item: object) => void} fn */
@@ -21,8 +23,16 @@ export class FimWatcher {
     this.onChange = fn;
   }
 
-async start() {
-  const paths = [...new Set(this.paths.map((p) => resolve(p)))];
+  isExcluded(path) {
+    const norm = resolve(path).toLowerCase();
+    const extras = (this.config.excludePaths || []).map((p) => resolve(p).toLowerCase());
+    const dataDir = (this.config.agentDataDir || '').toLowerCase();
+    if (dataDir && norm.startsWith(dataDir)) return true;
+    return extras.some((ex) => norm === ex || norm.startsWith(`${ex}\\`) || norm.startsWith(`${ex}/`));
+  }
+
+  async start() {
+  const paths = [...new Set(this.paths.map((p) => resolve(p)))].filter((p) => !this.isExcluded(p));
 
   for (const path of paths) {
     let st;
@@ -92,10 +102,13 @@ async start() {
   }
 
   async walkBaseline(path, depth) {
+    if (this.baselineFiles >= this.maxBaselineFiles) return;
     if (depth > (this.config.maxDepth ?? 3)) return;
     try {
       const st = await stat(path);
       if (st.isFile()) {
+        if (this.baselineFiles >= this.maxBaselineFiles) return;
+        this.baselineFiles += 1;
         const hash = await this.hashFile(path);
         this.state.data.fimBaseline[path] = { mtime: st.mtimeMs, size: st.size, hash };
         return;

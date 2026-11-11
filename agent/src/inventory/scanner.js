@@ -2,13 +2,27 @@ import os from 'node:os';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { readFile } from 'node:fs/promises';
+import { indexForCategory } from './wazuh-collectors.js';
+import { parsePsJson } from './parse-ps-json.js';
+import {
+  scanWindowsSystem,
+  scanWindowsHardware,
+  scanWindowsInterfaces,
+  scanWindowsNetworks,
+  scanWindowsPorts,
+  scanWindowsPackages,
+  scanWindowsHotfixes,
+  scanWindowsNetProtocols,
+} from './windows-scan.js';
+import { tcpStateName } from './dbsync-wire.js';
 
 const execFileAsync = promisify(execFile);
 
-function item(id, index, data) {
+function item(id, category, data) {
   return {
     id,
-    index,
+    index: indexForCategory(category),
+    category,
     operation: 'update',
     timestamp: new Date().toISOString(),
     data,
@@ -16,30 +30,51 @@ function item(id, index, data) {
 }
 
 export class InventoryScanner {
+  /** @param {object} [opts] */
+  constructor(opts = {}) {
+    this.maxPerCategory = opts.maxItemsPerCategory || 2000;
+    this.lastCategoryStatus = {};
+  }
+
   async scanSystem() {
     const items = [];
-    items.push(
-      item('system-1', 'wazuh-states-inventory-system', {
-        hostname: os.hostname(),
-        os: process.platform,
-        os_version: os.release(),
-        arch: os.arch(),
-        cpus: os.cpus().length,
-        memory: os.totalmem(),
-        uptime: os.uptime(),
-        machine_id: os.hostname(),
-      }),
-    );
+    const status = {};
+    this.lastCategoryStatus = status;
 
     if (process.platform === 'win32') {
-      items.push(...await this.scanWindowsPackages());
-      items.push(...await this.scanWindowsHotfixes());
-      items.push(...await this.scanWindowsServices());
-      items.push(...await this.scanWindowsUsers());
-      items.push(...await this.scanWindowsProcesses());
-      items.push(...await this.scanWindowsPorts());
-      items.push(...await this.scanWindowsNetwork());
+      const scans = [
+        ['system', scanWindowsSystem],
+        ['hardware', scanWindowsHardware],
+        ['interfaces', scanWindowsInterfaces],
+        ['protocols', () => scanWindowsNetProtocols(this.maxPerCategory)],
+        ['networks', scanWindowsNetworks],
+        ['packages', () => scanWindowsPackages(this.maxPerCategory)],
+        ['hotfixes', () => scanWindowsHotfixes(this.maxPerCategory)],
+        ['ports', () => scanWindowsPorts(this.maxPerCategory)],
+      ];
+      for (const [cat, fn] of scans) {
+        const result = await fn();
+        status[cat] = { count: result.items.length, error: result.error || null };
+        items.push(...result.items);
+      }
+      const extra = await this.scanWindowsLegacyCategories();
+      for (const [cat, result] of Object.entries(extra)) {
+        status[cat] = { count: result.items.length, error: result.error || null };
+        items.push(...result.items);
+      }
     } else {
+      items.push(
+        item('system-1', 'system', {
+          hostname: os.hostname(),
+          os: process.platform,
+          os_version: os.release(),
+          arch: os.arch(),
+          cpus: os.cpus().length,
+          memory: os.totalmem(),
+          uptime: os.uptime(),
+          machine_id: os.hostname(),
+        }),
+      );
       items.push(...await this.scanLinuxPackages());
       items.push(...await this.scanLinuxServices());
       items.push(...await this.scanLinuxUsers());
@@ -48,13 +83,36 @@ export class InventoryScanner {
       items.push(...await this.scanLinuxNetwork());
     }
 
-    const ifaces = os.networkInterfaces();
-    for (const [name, addrs] of Object.entries(ifaces)) {
-      for (const addr of addrs || []) {
-        items.push(item(`iface-${name}-${addr.address}`, 'wazuh-states-inventory-interfaces', { name, ...addr }));
+    if (process.platform !== 'win32') {
+      const ifaces = os.networkInterfaces();
+      for (const [name, addrs] of Object.entries(ifaces)) {
+        for (const addr of addrs || []) {
+          items.push(item(`iface-${name}-${addr.address}`, 'interfaces', { name, ...addr }));
+        }
       }
     }
+    this.lastCategoryStatus = status;
     return items;
+  }
+
+  async scanWindowsLegacyCategories() {
+    const out = {};
+    try {
+      out.services = { items: await this.scanWindowsServices() };
+    } catch (err) {
+      out.services = { items: [], error: err.message };
+    }
+    try {
+      out.users = { items: await this.scanWindowsUsers() };
+    } catch (err) {
+      out.users = { items: [], error: err.message };
+    }
+    try {
+      out.processes = { items: await this.scanWindowsProcesses() };
+    } catch (err) {
+      out.processes = { items: [], error: err.message };
+    }
+    return out;
   }
 
   async scanWindowsPackages() {
@@ -74,7 +132,7 @@ export class InventoryScanner {
         const key = `${pkg.DisplayName}:${pkg.DisplayVersion}`;
         if (seen.has(key)) continue;
         seen.add(key);
-        items.push(item(`pkg-${key}`, 'wazuh-states-inventory-packages', {
+        items.push(item(`pkg-${key}`, 'packages', {
           name: pkg.DisplayName,
           version: pkg.DisplayVersion,
           publisher: pkg.Publisher,
@@ -97,7 +155,7 @@ export class InventoryScanner {
       ], { timeout: 120000 });
       const fixes = JSON.parse(stdout.startsWith('[') ? stdout : `[${stdout}]`);
       for (const f of fixes.slice(0, 500)) {
-        items.push(item(`hf-${f.HotFixID}`, 'wazuh-states-inventory-hotfixes', {
+        items.push(item(`hf-${f.HotFixID}`, 'hotfixes', {
           hotfix_id: f.HotFixID,
           description: f.Description,
           installed_on: f.InstalledOn,
@@ -119,7 +177,7 @@ export class InventoryScanner {
       ], { timeout: 120000, maxBuffer: 8 * 1024 * 1024 });
       const svcs = JSON.parse(stdout.startsWith('[') ? stdout : `[${stdout}]`);
       for (const s of svcs.slice(0, 400)) {
-        items.push(item(`svc-${s.Name}`, 'wazuh-states-inventory-services', {
+        items.push(item(`svc-${s.Name}`, 'services', {
           name: s.Name,
           display_name: s.DisplayName,
           state: s.State,
@@ -145,7 +203,7 @@ export class InventoryScanner {
       ], { timeout: 60000 });
       const users = JSON.parse(stdout.startsWith('[') ? stdout : `[${stdout}]`);
       for (const u of users) {
-        items.push(item(`user-${u.Name}`, 'wazuh-states-inventory-users', {
+        items.push(item(`user-${u.Name}`, 'users', {
           name: u.Name,
           enabled: u.Enabled,
         }));
@@ -157,7 +215,7 @@ export class InventoryScanner {
       ], { timeout: 60000 });
       const grps = JSON.parse(groups.startsWith('[') ? groups : `[${groups}]`);
       for (const g of grps) {
-        items.push(item(`grp-${g.Name}`, 'wazuh-states-inventory-groups', { name: g.Name }));
+        items.push(item(`grp-${g.Name}`, 'groups', { name: g.Name }));
       }
     } catch {
       // skip
@@ -171,16 +229,19 @@ export class InventoryScanner {
       const { stdout } = await execFileAsync('powershell.exe', [
         '-NoProfile',
         '-Command',
-        'Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId,Name,ExecutablePath,CommandLine | ConvertTo-Json -Compress',
+        'Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId,Name,ExecutablePath,CommandLine,WorkingSetSize,Priority,CreationDate | ConvertTo-Json -Compress',
       ], { timeout: 120000, maxBuffer: 8 * 1024 * 1024 });
       const procs = JSON.parse(stdout.startsWith('[') ? stdout : `[${stdout}]`);
       for (const p of procs.slice(0, 200)) {
-        items.push(item(`proc-${p.ProcessId}`, 'wazuh-states-inventory-processes', {
+        items.push(item(`proc-${p.ProcessId}`, 'processes', {
           pid: p.ProcessId,
           ppid: p.ParentProcessId,
           name: p.Name,
           path: p.ExecutablePath,
           command_line: p.CommandLine,
+          memory_bytes: p.WorkingSetSize,
+          priority: p.Priority,
+          start_time: p.CreationDate,
         }));
       }
     } catch {
@@ -195,16 +256,16 @@ export class InventoryScanner {
       const { stdout } = await execFileAsync('powershell.exe', [
         '-NoProfile',
         '-Command',
-        'Get-NetTCPConnection -State Listen,Established -ErrorAction SilentlyContinue | Select-Object LocalAddress,LocalPort,OwningProcess,State | ConvertTo-Json -Compress',
+        'Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue | Select-Object LocalAddress,LocalPort,OwningProcess,State | ConvertTo-Json -Compress',
       ], { timeout: 60000 });
       const ports = JSON.parse(stdout.startsWith('[') ? stdout : `[${stdout}]`);
       for (const p of ports.slice(0, 300)) {
-        items.push(item(`port-tcp-${p.LocalAddress}-${p.LocalPort}-${p.OwningProcess}`, 'wazuh-states-inventory-ports', {
+        items.push(item(`port-tcp-${p.LocalAddress}-${p.LocalPort}-${p.OwningProcess}`, 'ports', {
           protocol: 'tcp',
           local_address: p.LocalAddress,
           local_port: p.LocalPort,
           pid: p.OwningProcess,
-          state: p.State,
+          state: tcpStateName(p.State),
         }));
       }
     } catch {
@@ -223,7 +284,7 @@ export class InventoryScanner {
       ], { timeout: 30000 });
       const routes = JSON.parse(stdout.startsWith('[') ? stdout : `[${stdout}]`);
       for (const r of routes) {
-        items.push(item(`route-${r.NextHop}`, 'wazuh-states-inventory-routes', {
+        items.push(item(`route-${r.NextHop}`, 'protocols', {
           gateway: r.NextHop,
           interface: r.InterfaceAlias,
         }));
@@ -233,7 +294,7 @@ export class InventoryScanner {
         '-Command',
         'Get-DnsClientServerAddress -AddressFamily IPv4 | Select-Object ServerAddresses,InterfaceAlias | ConvertTo-Json -Compress',
       ], { timeout: 30000 });
-      items.push(item('dns-1', 'wazuh-states-inventory-dns', { raw: dns.slice(0, 2000) }));
+      items.push(item('dns-1', 'protocols', { raw: dns.slice(0, 2000) }));
     } catch {
       // skip
     }
@@ -246,14 +307,14 @@ export class InventoryScanner {
       const { stdout } = await execFileAsync('dpkg-query', ['-W', '-f=${Package}\t${Version}\t${Architecture}\n']);
       for (const line of stdout.split('\n').filter(Boolean).slice(0, 800)) {
         const [name, version, architecture] = line.split('\t');
-        items.push(item(`pkg-${name}`, 'wazuh-states-inventory-packages', { name, version, architecture }));
+        items.push(item(`pkg-${name}`, 'packages', { name, version, architecture }));
       }
     } catch {
       try {
         const { stdout } = await execFileAsync('rpm', ['-qa', '--qf', '%{NAME}\t%{VERSION}\t%{ARCH}\n']);
         for (const line of stdout.split('\n').filter(Boolean).slice(0, 800)) {
           const [name, version, architecture] = line.split('\t');
-          items.push(item(`pkg-${name}`, 'wazuh-states-inventory-packages', { name, version, architecture }));
+          items.push(item(`pkg-${name}`, 'packages', { name, version, architecture }));
         }
       } catch {
         // no package manager
@@ -271,7 +332,7 @@ export class InventoryScanner {
         const unit = parts[0];
         const active = parts[2];
         const sub = parts[3];
-        items.push(item(`svc-${unit}`, 'wazuh-states-inventory-services', {
+        items.push(item(`svc-${unit}`, 'services', {
           unit,
           active_state: active,
           sub_state: sub,
@@ -289,12 +350,12 @@ export class InventoryScanner {
       const passwd = await readFile('/etc/passwd', 'utf8');
       for (const line of passwd.split('\n').filter(Boolean).slice(0, 500)) {
         const [name] = line.split(':');
-        items.push(item(`user-${name}`, 'wazuh-states-inventory-users', { name }));
+        items.push(item(`user-${name}`, 'users', { name }));
       }
       const group = await readFile('/etc/group', 'utf8');
       for (const line of group.split('\n').filter(Boolean).slice(0, 500)) {
         const [name, , , members] = line.split(':');
-        items.push(item(`grp-${name}`, 'wazuh-states-inventory-groups', { name, members: members?.split(',') || [] }));
+        items.push(item(`grp-${name}`, 'groups', { name, members: members?.split(',') || [] }));
       }
     } catch {
       // permission
@@ -309,7 +370,7 @@ export class InventoryScanner {
       for (const line of stdout.split('\n').filter(Boolean).slice(0, 200)) {
         const m = line.trim().match(/^(\d+)\s+(\d+)\s+(\S+)\s+(\S+)\s+(\S+)\s+(\S+)\s+(.*)$/);
         if (!m) continue;
-        items.push(item(`proc-${m[1]}`, 'wazuh-states-inventory-processes', {
+        items.push(item(`proc-${m[1]}`, 'processes', {
           pid: Number(m[1]),
           ppid: Number(m[2]),
           user: m[3],
@@ -330,7 +391,7 @@ export class InventoryScanner {
     try {
       const { stdout } = await execFileAsync('ss', ['-tunlpH']);
       for (const line of stdout.split('\n').filter(Boolean).slice(0, 300)) {
-        items.push(item(`port-${line.slice(0, 80)}`, 'wazuh-states-inventory-ports', { line }));
+        items.push(item(`port-${line.slice(0, 80)}`, 'ports', { line }));
       }
     } catch {
       // skip
@@ -344,7 +405,7 @@ export class InventoryScanner {
       const { stdout } = await execFileAsync('ip', ['route']);
       for (const line of stdout.split('\n').filter(Boolean).slice(0, 50)) {
         if (line.startsWith('default')) {
-          items.push(item(`route-${line}`, 'wazuh-states-inventory-routes', { line }));
+          items.push(item(`route-${line}`, 'protocols', { line }));
         }
       }
     } catch {

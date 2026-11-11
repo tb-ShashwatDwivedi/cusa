@@ -49,6 +49,7 @@ export function getProtocolProfile(version, enrollment = {}) {
       family,
       adapter: 'v4',
       syncMode: 'legacy',
+      batchJson: false,
       enrollVersion,
       managerTarget: version?.startsWith('4.') ? version : '4.11',
     };

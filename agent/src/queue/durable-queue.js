@@ -24,6 +24,9 @@ export class DurableQueue {
     this.dropped = 0;
     this.spoolBytes = 0;
     this.oldestCreatedAt = null;
+    this._pendingDirty = false;
+    this._pendingFlushTimer = null;
+    this.pendingFlushMs = opts.pendingFlushMs ?? 300;
   }
 
   async init() {
@@ -34,25 +37,40 @@ export class DurableQueue {
     } catch {
       this.pending = [];
     }
-    await this.reloadSpool();
-    await this.compactPending();
     this.spoolBytes = await this.spoolSizeBytes();
+    const hugeSpoolBytes = 16 * 1024 * 1024;
+    if (this.spoolBytes > hugeSpoolBytes) {
+      // ponytail: shiftFirstLine is O(file) per item — truncate stuck spool instead of hanging startup
+      await writeFile(this.spoolPath, '');
+      this.spoolBytes = 0;
+      const live = new Set(this.memory.map((i) => i.id));
+      this.pending = this.pending.filter((id) => live.has(id));
+      await this.persistPending();
+    } else {
+      await this.reloadSpool();
+      await this.compactPending();
+      this.spoolBytes = await this.spoolSizeBytes();
+    }
   }
 
   /** Drop pending IDs with no in-memory/spool payload (e.g. after agent restart). */
   async compactPending() {
     const live = new Set(this.memory.map((i) => i.id));
     if (this.inFlight) live.add(this.inFlight.id);
-    try {
-      await forEachLine(this.spoolPath, (line) => {
-        try {
-          live.add(JSON.parse(line).id);
-        } catch {
-          // skip bad line
-        }
-      });
-    } catch {
-      // no spool
+    const spoolBytes = await this.spoolSizeBytes();
+    const scanCap = 8 * 1024 * 1024;
+    if (spoolBytes <= scanCap) {
+      try {
+        await forEachLine(this.spoolPath, (line) => {
+          try {
+            live.add(JSON.parse(line).id);
+          } catch {
+            // skip bad line
+          }
+        });
+      } catch {
+        // no spool
+      }
     }
     const before = this.pending.length;
     this.pending = this.pending.filter((id) => live.has(id));
@@ -108,12 +126,29 @@ export class DurableQueue {
     }
     this.pending.push(item.id);
     if (!this.oldestCreatedAt) this.oldestCreatedAt = item.createdAt;
-    await this.persistPending();
+    this.schedulePersistPending();
     return item.id;
   }
 
-  async persistPending() {
+  schedulePersistPending() {
+    this._pendingDirty = true;
+    if (this._pendingFlushTimer) return;
+    this._pendingFlushTimer = setTimeout(() => {
+      this._pendingFlushTimer = null;
+      void this.flushPending();
+    }, this.pendingFlushMs);
+    this._pendingFlushTimer.unref?.();
+  }
+
+  async flushPending() {
+    if (!this._pendingDirty) return;
+    this._pendingDirty = false;
     await writeFile(this.pendingPath, JSON.stringify(this.pending));
+  }
+
+  async persistPending() {
+    this._pendingDirty = true;
+    await this.flushPending();
   }
 
   /** @returns {object|null} */

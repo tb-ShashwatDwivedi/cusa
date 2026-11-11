@@ -6,7 +6,7 @@
   "wazuh": {
     "version": "4.11",
     "manager": {
-      "address": null,
+      "address": null, 
       "port": 1514,
       "enrollmentPort": 1515,
       "protocol": "tcp"
@@ -22,10 +22,19 @@
     }
   },
   "queue": {
-    "memoryLimit": 500,
-    "diskLimitMb": 256,
-    "flushIntervalMs": 1000,
-    "maxRetries": 10
+    "memoryLimit": 120,
+    "diskLimitMb": 64,
+    "flushIntervalMs": 2000,
+    "disconnectedFlushIntervalMs": 30000,
+    "batchSize": 40,
+    "stateBatchSize": 80,
+    "maxEventBatchSize": 40,
+    "backpressureDepth": 150,
+    "maxEventDepth": 800,
+    "maxRetries": 8
+  },
+  "diagnostics": {
+    "memoryWarnRssMb": 384
   },
   "api": {
     "host": "127.0.0.1",
@@ -35,11 +44,12 @@
     "level": "info"
   },
   "collectors": {
-    "eventChannel": { "enabled": true, "intervalMs": 5000 },
-    "sysmon": { "enabled": false },
-    "defender": { "enabled": false },
-    "powershell": { "enabled": false },
-    "journald": { "enabled": true, "intervalMs": 5000 },
+    "staggerMs": 3000,
+    "eventChannel": { "enabled": true, "intervalMs": 60000, "maxEventsPerPoll": 10, "tailFromNow": true },
+    "sysmon": { "enabled": false, "intervalMs": 60000, "maxEventsPerPoll": 10, "tailFromNow": true },
+    "defender": { "enabled": false, "intervalMs": 60000, "maxEventsPerPoll": 10, "tailFromNow": true },
+    "powershell": { "enabled": false, "intervalMs": 60000, "maxEventsPerPoll": 10, "tailFromNow": true },
+    "journald": { "enabled": true, "intervalMs": 15000 },
     "syslog": { "enabled": true },
     "fileTail": { "enabled": false, "paths": [] }
   },
@@ -51,7 +61,8 @@
     "intervalMs": 86400000
   },
   "inventory": {
-    "intervalMs": 3600000
+    "intervalMs": 3600000,
+    "maxItemsPerCategory": 2000
   },
   "filters": {
     "defaultAction": "include",
@@ -65,5 +76,5 @@
     "product": "cusa-agent",
     "publicKeyPem": null
   },
-  "locked": ["collectors.sysmon"]
+  "locked": []
 }

@@ -11,8 +11,17 @@ import { saveSecrets, loadSecrets } from '../../security/secrets.js';
  * @param {string} [opts.ca]
  * @param {string} [opts.agentVersion] Wazuh-style V: field (e.g. Wazuh v4.11.2)
  */
+const ENROLL_SOCKET_MS = 12_000;
+
 export function enroll(opts) {
   return new Promise((resolve, reject) => {
+    let settled = false;
+    const finish = (fn, value) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      fn(value);
+    };
     const tlsOpts = {
       host: opts.host,
       port: opts.port,
@@ -30,9 +39,15 @@ export function enroll(opts) {
       socket.write(Buffer.concat([header, buf]));
     });
 
+    const timer = setTimeout(() => {
+      socket.destroy();
+      finish(reject, new Error('Enrollment timed out'));
+    }, ENROLL_SOCKET_MS);
+    timer.unref?.();
+
     const chunks = [];
     socket.on('data', (d) => chunks.push(d));
-    socket.on('error', reject);
+    socket.on('error', (err) => finish(reject, err));
     socket.on('end', () => {
       const buf = Buffer.concat(chunks);
       let body = buf;
@@ -42,8 +57,8 @@ export function enroll(opts) {
       }
       const raw = body.toString('utf8');
       const match = raw.match(/OSSEC K:'(\d+)\s+(\S+)\s+(\S+)\s+(\S+)'/);
-      if (!match) return reject(new Error(`Enrollment failed: ${raw}`));
-      resolve({ id: match[1], name: match[2], ip: match[3], key: match[4] });
+      if (!match) return finish(reject, new Error(`Enrollment failed: ${raw}`));
+      finish(resolve, { id: match[1], name: match[2], ip: match[3], key: match[4] });
     });
   });
 }

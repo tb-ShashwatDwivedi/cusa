@@ -9,7 +9,9 @@ import { normalizeEvent } from '../pipeline/normalize.js';
 import { validateEvent } from '../pipeline/validator.js';
 import { InventoryScanner } from '../inventory/scanner.js';
 import { computeDelta } from '../inventory/delta.js';
+import { UNSUPPORTED_WIRE_CATEGORIES } from '../inventory/wazuh-collectors.js';
 import { FimWatcher } from '../fim/watcher.js';
+import { fimItemToIngestEvent, registryItemToIngestEvent } from '../fim/wire-event.js';
 import { RegistryWatcher } from '../registry/watcher.js';
 import { ComplianceEngine } from '../compliance/engine.js';
 import { ActiveResponseExecutor } from '../active-response/executor.js';
@@ -49,6 +51,10 @@ import {
   assertConfigValid,
 } from '../wazuh/v4/central-config.js';
 import { validateAgentConfig } from '../config/validate-config.js';
+import { SourceReplayGuard } from '../pipeline/source-replay-guard.js';
+import { sourceEventIdentity } from '../pipeline/source-identity.js';
+import { mergeInventoryOnFailure, groupInventoryByCategory } from '../inventory/merge.js';
+import { sortInventoryForWire } from '../inventory/wire-order.js';
 
 export { AGENT_VERSION };
 
@@ -110,6 +116,8 @@ export class Agent {
     this.heavyJobs = new JobGate();
     this.memorySampler = null;
     this.wazuhCommandHandler = null;
+    this.replayGuard = new SourceReplayGuard(this.paths.cache);
+    this.inventoryStatus = {};
   }
 
   async start() {
@@ -121,6 +129,7 @@ export class Agent {
     await this.responseAudit.init();
     this.apiToken = await ensureApiToken(this.paths.cache);
     await this.state.load();
+    await this.replayGuard.init();
     await this.queue.init();
     await this.wazuh.init();
     this.registerWazuhHandlers();
@@ -129,7 +138,6 @@ export class Agent {
     for (const c of this.collectors) {
       c.setEventHandler((partial) => this.ingestEvent(partial));
       this.health.registerCollector(c.name, () => c.health());
-      if (isCollectorEnabled(this.config.collectors, c.name)) await c.start();
     }
 
     // if (this.config.fim?.paths?.length) {
@@ -140,28 +148,28 @@ export class Agent {
 
     if (this.config.fim?.paths?.length) {
       this.fim = new FimWatcher(
-        this.config.fim,
+        { ...this.config.fim, agentDataDir: this.config.agent?.dataDir || this.paths?.data },
         this.state,
-        this.logger
+        this.logger,
       );
-    
-      this.fim.setHandler((item) =>
-        this.queue.enqueueState(item)
-      );
-    
-      await this.fim.start();
+      this.fim.setHandler((item) => { void this.ingestEvent(fimItemToIngestEvent(item)); });
     }
 
     if (this.config.registry?.keys?.length && process.platform === 'win32') {
       this.registry = new RegistryWatcher(this.config.registry, this.state);
-      this.registry.setHandler((item) => this.queue.enqueueState(item));
-      await this.registry.start();
+      this.registry.setHandler((item) => { void this.ingestEvent(registryItemToIngestEvent(item)); });
     }
 
     await this.compliance.load();
     this.queue.startFlusher(this.wazuh, this.metrics);
     this.health.setQueue('ok', this.queue.totalDepth());
     await this.tamper.init();
+
+    this.api = await createApiServer(this);
+    this.running = true;
+
+    void this.startCollectorsStaggered();
+    void this.startDeferredWatchers();
 
     this.scheduler.schedule('inventory', this.config.inventory?.intervalMs || 3600000, () =>
       this.heavyJobs.run(() => this.syncInventory()),
@@ -174,14 +182,12 @@ export class Agent {
     this.scheduler.schedule('rootkit-scan', 86400000, () =>
       this.heavyJobs.run(() => this.runRootkitScan()),
     );
-    await this.syncManagerConfig();
-    await this.heavyJobs.run(() => this.syncInventory());
+    void this.syncManagerConfig();
+    void this.heavyJobs.run(() => this.syncInventory());
 
-    this.api = await createApiServer(this);
     this.memorySampler = startMemorySampler(this.logger, {
       warnRssMb: this.config.diagnostics?.memoryWarnRssMb ?? 200,
     });
-    this.running = true;
     const mgr = this.config.wazuh.manager?.address;
     eventLog.agent('Agent running', {
       manager: mgr,
@@ -201,30 +207,95 @@ export class Agent {
     this.wazuh.onCommand?.(this.wazuhCommandHandler);
   }
 
+  async startCollectorsStaggered() {
+    const staggerMs = this.config.collectors?.staggerMs ?? 3000;
+    for (const c of this.collectors) {
+      if (!isCollectorEnabled(this.config.collectors, c.name)) continue;
+      await c.start();
+      if (staggerMs > 0) await new Promise((r) => setTimeout(r, staggerMs));
+    }
+  }
+
+  async startDeferredWatchers() {
+    try {
+      if (this.fim) await this.fim.start();
+      if (this.registry) await this.registry.start();
+    } catch (err) {
+      this.logger.warn({ err }, 'Deferred watcher start failed');
+    }
+  }
+
   async ingestEvent(partial) {
     try {
+      const backpressureDepth = this.config.queue?.backpressureDepth ?? 350;
+      const maxEventDepth = this.config.queue?.maxEventDepth ?? 2500;
+      const eventDepth = this.queue.events.depth();
+      if (
+        (!this.metrics.transportConnected && eventDepth >= backpressureDepth)
+        || (this.metrics.transportConnected && eventDepth >= maxEventDepth)
+      ) {
+        this.metrics.inc('eventsDroppedBackpressure');
+        return;
+      }
       const agentId = this.state.data.enrollment?.agentId || this.wazuh.adapter?.identity?.id;
       let event = normalizeEvent(partial, { agentId });
       event = enrichEvent(event, agentId);
       const { allow } = applyEventFilters(event, this.config.filters || {});
-      if (!allow) return;
+      if (!allow) {
+        this.metrics.inc('eventsFiltered');
+        return;
+      }
       event = validateEvent(event);
+      const identity = sourceEventIdentity(event);
+      if (identity && this.replayGuard.isReplay(identity)) {
+        this.metrics.inc('eventsSourceReplaySuppressed');
+        return;
+      }
       this.metrics.inc('eventsCollected');
+      this.metrics.inc('eventsAccepted');
       this.metrics.lastEventAt = new Date().toISOString();
       eventLog.collected(event);
       await this.queue.enqueueEvent(event);
+      if (identity) await this.replayGuard.markSeen(identity);
     } catch (err) {
+      this.metrics.inc('eventsInvalid');
       this.logger.warn({ err }, 'Event ingestion failed');
     }
   }
 
+  async resetInventorySync() {
+    await this.queue.state.clear();
+    this.state.data.lastInventory = [];
+    this.state.data.lastInventoryByCategory = {};
+    this.state.data.inventoryInitialSyncDone = false;
+    await this.state.save();
+    await this.syncInventory();
+  }
+
   async syncInventory() {
-    const scanner = new InventoryScanner();
-    const items = await scanner.scanSystem();
-    const delta = computeDelta(this.state.data.lastInventory || [], items);
-    this.state.data.lastInventory = items;
+    const scanner = new InventoryScanner({
+      maxItemsPerCategory: this.config.inventory?.maxItemsPerCategory,
+    });
+    const scanned = await scanner.scanSystem();
+    this.inventoryStatus = scanner.lastCategoryStatus || {};
+    const previous = this.state.data.lastInventory || [];
+    const merged = mergeInventoryOnFailure(scanned, previous, this.inventoryStatus);
+    let delta = computeDelta(previous, merged);
+    const forceInitial = !this.state.data.inventoryInitialSyncDone;
+    if (forceInitial && !delta.length && merged.length) {
+      delta = merged.map((i) => ({ ...i, operation: 'create' }));
+    }
+    delta = sortInventoryForWire(
+      delta.filter((i) => !UNSUPPORTED_WIRE_CATEGORIES.has(i.category)),
+    );
     for (const item of delta) {
       await this.queue.enqueueState(item);
+      this.metrics.inc('inventoryItemsEnqueued');
+    }
+    if (delta.length || forceInitial) {
+      this.state.data.lastInventory = merged;
+      this.state.data.lastInventoryByCategory = groupInventoryByCategory(merged);
+      if (forceInitial) this.state.data.inventoryInitialSyncDone = true;
     }
     this.state.data.lastSync = new Date().toISOString();
     await this.state.save();
@@ -398,13 +469,16 @@ export class Agent {
       if (isCollectorEnabled(this.config.collectors, c.name)) await c.start();
     }
     if (this.config.fim?.paths?.length) {
-      this.fim = new FimWatcher(this.config.fim, this.state);
-      this.fim.setHandler((item) => this.queue.enqueueState(item));
+      this.fim = new FimWatcher(
+        { ...this.config.fim, agentDataDir: this.config.agent?.dataDir || this.paths?.data },
+        this.state,
+      );
+      this.fim.setHandler((item) => { void this.ingestEvent(fimItemToIngestEvent(item)); });
       await this.fim.start();
     }
     if (this.config.registry?.keys?.length && process.platform === 'win32') {
       this.registry = new RegistryWatcher(this.config.registry, this.state);
-      this.registry.setHandler((item) => this.queue.enqueueState(item));
+      this.registry.setHandler((item) => { void this.ingestEvent(registryItemToIngestEvent(item)); });
       await this.registry.start();
     }
     await this.compliance.load();
@@ -483,7 +557,7 @@ export class Agent {
     this.fim?.stop();
     this.registry?.stop();
     await this.queue.drain(this.wazuh, 15000);
-    this.queue.stop();
+    await this.queue.stop();
     await this.wazuh.close();
     await this.api?.close();
     await this.state.save();
