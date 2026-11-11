@@ -218,3 +218,125 @@ flowchart TB
 **Skipped / not validated in this pass:** live runs against your Wazuh 4.11.2 manager, MSI uninstall on a real endpoint, or CYB ticket acceptance criteria — review is **code + docs vs your matrix**.
 
 **Risk for you:** Until central config and secure enrollment defaults are fixed, new feature work on collectors/FIM will keep **silently failing in production** because paths and policies never arrive from the manager. Prioritize the manager control plane before UI polish.
+
+
+#	Feature	Priority	Status
+1	Agent Installation & Service	Must	
+Working
+
+2	Agent Enrollment	Must	
+Working
+
+3	Endpoint Identification	Must	
+Working
+
+4	Agent Heartbeat	Must	
+Working
+
+5	Secure Agent Communication	Must	
+Broken                                          CYB-5300
+
+6	Central Configuration	Must	
+Broken                                          CYB-6085
+
+7	Windows Event Log Collection	Must	
+Partial (3 channels only)               CYB-6103
+
+8	Linux Log Collection	Must	
+Not Supported As of Now           CYB-6109
+
+9	Custom Log File Monitoring	Must	
+Broken CYB-6110
+
+10	Log Filtering	Must	
+Broken (no UI) 
+
+11	Security Event Collection	Must	
+Partial
+
+12	File Integrity Monitoring (FIM)	Must	
+Broken CYB-5996
+
+13	FIM Baseline	Must	
+Broken (empty) CYB-6031
+
+14	Registry Monitoring	Must	
+Broken (empty baseline)
+
+15	Rootkit / Suspicious System Check	Should	
+Not Supported   CYB-6108
+
+16	Security Configuration Assessment	Must	
+Broken CYB-6085
+
+17	System Inventory	Must	
+Working
+
+18	Software Inventory	Must	
+Working
+
+19	Network Inventory	Must	
+Working
+
+20	Process Inventory	Must	
+Working
+
+21	Service Inventory	Must	
+Working
+
+22	User/Group Inventory	Should	
+Working
+
+23	Open Port Inventory	Should	
+Working
+
+24	Vulnerability Detection Input	Must	
+Partial (no CVE correlation)
+
+25	Policy/Compliance Data	Must	
+Broken                                        CYB-6085
+
+26	Local Event Buffering	Must	
+Partial
+
+27	Automatic Reconnection	Must	
+Partial
+
+28	Event Queue Management	Must	
+Partial
+
+29	Event Metadata Enrichment	Must	
+Working
+
+30	Agent Logs	Must	
+Working
+
+31	Agent Health Monitoring	Must	
+Working 
+
+32	Remote Agent Restart	Should	
+Not Supported
+
+33	Agent Upgrade	Must	
+Not Supported
+
+34	Agent Uninstall / Decommission	Must	
+Broken                                            CYB-6092
+
+35	Active Response Framework	Must	
+Not Supported                               CYB-6106
+
+36	Process Termination	Should	
+Not Supported                               CYB-6106
+
+37	IP Blocking Action	Should	
+Not Supported                               CYB-6106
+
+38	Custom Response Script	Should	
+Not Supported                                CYB-6106
+
+39	Response Audit Logging	Must	
+Working
+
+40	Agent Tamper Detection	Should	
+Broken                                             CYB-6107
