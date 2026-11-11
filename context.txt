@@ -1,0 +1,220 @@
+Using **using-superpowers** (check relevant process skills first): this is a read-only architecture/product review, not an implementation task — no code changes.
+
+Your QA matrix and what is in the **CUSA** repo (`agent/`, `gui/`, MSI, Wazuh v4 adapter) largely agree. The bigger problem is a **documentation and architecture gap**: `docs/architecture.md` scores **35/40 “Full”**, while field testing shows many **Must** items broken. That mismatch is itself a design/process flaw (verification truth vs. marketing truth).
+
+---
+
+## Executive verdict
+
+CUSA is a **Node.js + localhost GUI** endpoint agent with a **partial Wazuh v4 compatibility layer**. The **inventory, enrollment, heartbeat, queues, and local API** paths are relatively complete. **Manager-driven behavior** (central config, native syscheck/SCA, Wazuh active response, secure enrollment defaults, Linux packaging) is where the product diverges from both Wazuh semantics and your matrix.
+
+At the architecture level, the agent optimizes for **“send something to tbSIEM”** more than **“behave like a Wazuh agent.”** That explains many CYB tickets clustering on **#5, #6, #10–14, #16, #25, #35–38**.
+
+---
+
+## Cross-cutting design flaws
+
+### 1. Wazuh parity is optional, not structural
+
+The stated pipeline is collectors → CUSA model → adapter → manager (`docs/architecture.md`). In practice, several “Must” capabilities are **parallel CUSA features** (custom JSON on queue `1`, local policy files) instead of **Wazuh modules** (syscheck queue `8`, manager-pushed `agent.conf`, stock active-response wire format).
+
+FIM is explicitly routed as **custom ingest events**, not syscheck state:
+
+```1:25:C:\Users\shashwat.dwivedi\Desktop\cusa\agent\src\fim\wire-event.js
+/** Wazuh-safe FIM events (queue 1). Native syscheck queue 8 needs stock JSON + location syscheck. @see docs/rules_decoder.md §7 */
+// ...
+    raw: JSON.stringify({
+      source: 'cusa_fim',
+      path,
+      type,
+```
+
+Meanwhile the serializer still knows syscheck is queue `8`, but the live path uses `collector: 'agent'` → queue `1` (`event-serializer.js`). **tbSIEM/FIM dashboards tuned for native syscheck will look “broken” even when CUSA fires events.**
+
+Same pattern for registry (`cusa-registry` channel) and compliance (local `policyPath` JSON, not manager SCA assignment).
+
+---
+
+### 2. Central configuration is architecturally incomplete (CYB-6085 hub)
+
+Documented honestly in architecture:
+
+```148:148:C:\Users\shashwat.dwivedi\Desktop\cusa\docs\architecture.md
+**Not yet implemented:** full Wazuh **agent.conf / merged.mg** pull from manager (keepalive sends placeholder `mergedMd5`).
+```
+
+Code doubles down:
+
+- Incoming manager file push is **ignored** (`#!-up file` in `commands.js` → control-only, no handler).
+- Keepalive **never** advertises a real `merged.mg` hash (`client.js` comment: “does not handle remoted shared-file push”).
+- `syncManagerConfig()` only reads **files already on disk** under `{dataDir}/manager/agent.conf` — not live pull from the manager.
+
+So **#6, #16, #25** fail together: SCA policies, log paths, and syscheck dirs expected from Wazuh groups never arrive unless something else drops XML on the endpoint. Local GUI overlay works; **enterprise central config does not.**
+
+`fetchConfiguration()` also uses a suspicious path (`dirname(dataDir)`), which can miss the same tree `syncManagerConfig` uses — inconsistent config roots.
+
+---
+
+### 3. Security model doc ≠ runtime defaults (CYB-5300)
+
+`docs/security-model.md` claims fail-closed TLS and no bypass. Defaults contradict that:
+
+```14:21:C:\Users\shashwat.dwivedi\Desktop\cusa\agent\config\default.json
+    "enrollment": {
+      "password": "wazuh-wui",
+      ...
+      "insecure": true,
+```
+
+Authd enrollment:
+
+```25:29:C:\Users\shashwat.dwivedi\Desktop\cusa\agent\src\wazuh\v4\enrollment.js
+    const tlsOpts = {
+      ...
+      rejectUnauthorized: opts.ca ? true : false,
+```
+
+API enrollment defaults `insecure !== false` → **TLS verification off** unless explicitly fixed (`client.js` + `api-enrollment.js`). That is a **product-level flaw**: secure comms are opt-in via CA/config discipline, not default posture.
+
+Data channel is **AES over cleartext TCP 1514** (Wazuh-legacy-correct), but auditors often bundle “secure agent communication” with **enrollment integrity + manager identity** — hence **Broken** in QA while architecture labels it **Full**.
+
+---
+
+### 4. “Implemented” vs “operational out of the box”
+
+Many modules exist but are **unconfigured or dev-centric**:
+
+| Area | Code exists | Why QA says broken/partial |
+|------|-------------|----------------------------|
+| FIM | `fim/watcher.js` | `fim.paths: []` in defaults; baseline walk **never `state.save()`** after initial scan — GUI/API baseline stays empty until a change |
+| Registry | `registry/watcher.js` | **No `registry.keys` in default config** — feature never starts |
+| File tail | `file-tail.js` | `enabled: false`, empty `paths` |
+| Filters | `pipeline/filter.js` | Works in agent; **no GUI fields** in `Configuration.jsx` (only collector toggles, FIM paths, etc.) |
+| Linux | collectors + `installer/linux/cusa-agent.service` | **No Linux MSI/package pipeline**; architecture says MSI-only production |
+| Active response | `executor.js` + allowlist | **No Wazuh active-response integration** (`#!-exec` / AR JSON); only heuristic `parseManagerCommand` on `#!-req` |
+| Upgrade | `updater.js` + **stub** in release pipeline | No shipped signed upgrade path; `publicKeyPem: null` |
+
+This is a **configuration-as-product** anti-pattern for enterprise Must features: the README lists FIM/SCA/AR as product features, but defaults leave them inert.
+
+---
+
+### 5. Windows collection architecture limits (#7, #11 partial)
+
+- Default channels are only **Security, System, Application** (`event-channel.js` `DEFAULT_CHANNELS`).
+- Sysmon/Defender/PowerShell collectors default **off** in `default.json` while architecture claims “Full” security event collection.
+- Collection is **PowerShell `Get-WinEvent` polling** (60s, `maxEventsPerPoll: 10`, `tailFromNow: true`) — latency, burst loss, and service-account permission sensitivity. Not wrong for MVP, but structurally **partial** for SOC-grade Windows logging.
+
+---
+
+### 6. FIM implementation ceilings (#12, #13, CYB-5996 / CYB-6031)
+
+Beyond empty config and missing baseline persist:
+
+- `fs.watch` + optional `recursive` on Windows (unreliable vs. ReadDirectoryChangesW / USN).
+- Baseline cap **300 files**, depth **3** (`maxBaselineFiles`, `maxDepth`).
+- Registry/FIM excluded from agent data dir (good) but no stock syscheck real-time sync to manager state index.
+
+These are **design ceilings**, not just bugs.
+
+---
+
+### 7. Active response disconnect (#35–38 vs #39 working)
+
+Executor and audit log are solid **locally**, but the **manager → agent command plane** for Wazuh AR is not wired to stock formats. Commands that don’t match substring heuristics become `unknown` and never reach the executor. QA “Not Supported” for framework/actions vs “Working” for audit is exactly what the code predicts.
+
+Remote restart is similarly split: **local API `/api/service`** vs **manager-driven restart** depending on remoted command shape.
+
+---
+
+### 8. Tamper detection scope (#40, CYB-6107)
+
+`TamperDetector` hashes a **small fixed list** (binary, secrets, local config). It does not protect service registry keys, MSI install dir, Wazuh identity, or config under ProgramData broadly. It also **rewrites baseline on change** rather than alerting and holding last-known-good — weak for tamper **response**, not just detection events.
+
+---
+
+### 9. Inventory / vuln (#24 partial)
+
+Scanner sends **packages + hotfixes** (good Wazuh inventory input). There is **no CVE correlation layer** in-repo (grep: no CVE/vuln module). “Partial” is correct; architecture calling #24 **Full** overstates value to vuln management.
+
+---
+
+### 10. Decommission / uninstall (#34, CYB-6092)
+
+Logic exists (`decommission.js`, MSI `CA_PurgeProgramData`, API purge). “Broken” in QA usually means **orchestration gaps**: uninstall MSI without purge flag, agent identity left on manager, service race, or GUI purge vs. Windows “Apps & Features” not documented for operators. Architecture marks **Full** without CI proof (#1 note in same doc).
+
+---
+
+### 11. Documentation as false assurance
+
+The feature table in `docs/architecture.md` (lines 388–437) conflicts with your matrix on **~15+ rows** (secure comms, central config, log filtering UI, Linux, AR, upgrade, tamper, uninstall, etc.). That creates **wrong prioritization** for engineering and auditors.
+
+---
+
+## Your matrix → likely root cause (concise)
+
+| # | Your status | Primary architectural cause |
+|---|-------------|-----------------------------|
+| 5 | Broken | TLS verify off by default; no CA pinning story; doc/runtime mismatch |
+| 6, 16, 25 | Broken | No remoted `agent.conf` / `merged.mg` push; disk-only parser |
+| 7, 11 | Partial | 3 channels; optional collectors off; poll limits |
+| 8 | Not supported | No production Linux install; dev-only collectors |
+| 9, 10 | Broken / no UI | fileTail off; filters agent-only, no GUI |
+| 12–14 | Broken / empty | Empty defaults; FIM baseline not persisted on scan; no `registry.keys` |
+| 24 | Partial | Inventory only, no CVE engine |
+| 26–28 | Partial | Queues work; backpressure drops, disconnect flush tuning, manager-side visibility |
+| 32–33 | Not supported | AR/command wire + updater stub / MSI-only upgrade |
+| 35–38 | Not supported | Wazuh AR protocol not implemented |
+| 40 | Broken | Narrow tamper surface; baseline mutates on change |
+| 34 | Broken | MSI/GUI/manager lifecycle not one coherent decommission story |
+
+Working rows (**1–4, 17–23, 29–31, 39**) align with the strongest modules: **service host, enrollment client, inventory scanner, queue, enrich, local API, audit sink**.
+
+---
+
+## Recommended fix **themes** (architecture order, not ticket order)
+
+1. **Manager contract first** — Implement remoted shared-file / group config (`#!-up file`, `merged.mg`, keepalive hashes) before more GUI. Unblocks #6, #9, #12–14, #16, #25.
+2. **Security baseline** — Flip defaults: `insecure: false`, require CA or documented enterprise MSI property; align `security-model.md` with code.
+3. **Wazuh-native modules** — FIM on syscheck queue/decoder contract; SCA from manager policies; AR from Wazuh command path — or explicitly rebrand as “CUSA extensions” in SIEM rules.
+4. **Operational defaults** — Sensible enterprise `default.json` / MSI deploy profile (channels, optional collectors, empty-but-documented FIM/registry).
+5. **Truth in docs** — Replace the 35/40 table with QA matrix + explicit “Wazuh stock vs CUSA custom” column.
+6. **Platform split** — Declare Linux Phase 2 with package + CI, or remove from Must until shipped.
+
+---
+
+## Architecture diagram (intent vs reality)
+
+```mermaid
+flowchart TB
+  subgraph working [Mostly working]
+    MSI[Windows MSI / Service]
+    ENR[Enrollment 1515 / API]
+    INV[Inventory / Heartbeat]
+    Q[Durable queues]
+    API[Localhost API + GUI]
+  end
+  subgraph weak [Weak / missing manager loop]
+    CC[Central config push]
+    AR[Wazuh active response]
+    SYSC[Native syscheck / SCA]
+  end
+  COL[Collectors]
+  ADP[Wazuh v4 adapter]
+  MGR[Wazuh Manager / tbSIEM]
+  COL --> Q --> ADP --> MGR
+  MSI --> ENR
+  ENR --> ADP
+  INV --> Q
+  API -.-> COL
+  CC -.x.-> COL
+  CC -.x.-> SYSC
+  MGR -.->|stock AR + shared config| AR
+  MGR -.->|stock AR + shared config| CC
+  SYSC -.-> Q
+```
+
+---
+
+**Skipped / not validated in this pass:** live runs against your Wazuh 4.11.2 manager, MSI uninstall on a real endpoint, or CYB ticket acceptance criteria — review is **code + docs vs your matrix**.
+
+**Risk for you:** Until central config and secure enrollment defaults are fixed, new feature work on collectors/FIM will keep **silently failing in production** because paths and policies never arrive from the manager. Prioritize the manager control plane before UI polish.
